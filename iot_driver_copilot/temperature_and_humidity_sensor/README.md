@@ -1,58 +1,93 @@
-SHT30 Temperature & Humidity Sensor HTTP Driver (I2C to HTTP)
+Temperature & Humidity Modbus RTU Driver (Java)
 
 Overview
-- Connects to a Sensirion SHT30-like sensor over I²C (address 0x40 or 0x41) and exposes an HTTP interface.
-- Periodically polls the sensor every 2 seconds and buffers the latest reading.
-- Supports calibration offsets for temperature and humidity.
-- Handles disconnection with retry and exponential backoff.
+- Bridges a Modbus RTU (RS485) temperature & humidity sensor to an HTTP interface.
+- Periodically polls the device over serial (Modbus RTU, 9600 8N1), decodes registers, and exposes HTTP endpoints.
+- Implements robust retry with exponential backoff and maintains the latest reading in memory.
 
-Build
-- Requirements: Go 1.20+
-- Build: go build -o sht30-driver
+Important Notes
+- All configuration is provided via environment variables. Runtime reconfiguration via HTTP is not supported; the /config PUT endpoint validates but does not change settings.
+- Serial port parameters are fixed at 9600 baud, 8 data bits, no parity, 1 stop bit (8N1). This driver assumes the OS/adapter defaults to 9600 8N1. If needed, configure the serial port externally before running the driver.
 
-Run
-Set environment variables as needed, then run the executable.
+Build & Run
+- Requires Java 11+.
 
-Environment Variables
-- HTTP_HOST: HTTP server host to bind (default: 0.0.0.0)
-- HTTP_PORT: HTTP server port (default: 8080)
-- I2C_BUS: I²C bus identifier (e.g., 1, i2c-1, or /dev/i2c-1) (default: 1)
-- I2C_ADDRESS: I²C address to use (allowed: 0x40 or 0x41) (default: 0x40)
-- CAL_TEMP_OFFSET: Optional temperature offset in °C (float, default: 0)
-- CAL_HUM_OFFSET: Optional humidity offset in %RH (float, default: 0)
-- BACKOFF_INITIAL_MS: Initial retry backoff when disconnected (default: 500)
-- BACKOFF_MAX_MS: Maximum retry backoff when disconnected (default: 10000)
-- MEAS_DELAY_MS: Measurement delay between command and read (default: 20)
+Compile:
+  javac Driver.java Config.java ModbusRTU.java Poller.java SimpleJson.java
 
-HTTP APIs
+Run:
+  HTTP_HOST=0.0.0.0 \
+  HTTP_PORT=8080 \
+  SERIAL_PORT=/dev/ttyUSB0 \
+  MODBUS_SLAVE_ID=1 \
+  POLL_INTERVAL_MS=1000 \
+  MODBUS_FUNCTION=4 \
+  HUMIDITY_REGISTER=0 \
+  TEMPERATURE_REGISTER=1 \
+  VALUE_DIVISOR=10 \
+  SERIAL_TIMEOUT_MS=800 \
+  BACKOFF_INITIAL_MS=500 \
+  BACKOFF_MAX_MS=10000 \
+  java Driver
+
+Environment Variables (required)
+- HTTP_HOST: Host/IP for HTTP server bind (e.g., 0.0.0.0)
+- HTTP_PORT: Port for HTTP server (e.g., 8080)
+- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0)
+- MODBUS_SLAVE_ID: Modbus slave/unit ID (1–247)
+- POLL_INTERVAL_MS: Polling interval in milliseconds (>=100)
+- MODBUS_FUNCTION: 3 for Holding Registers or 4 for Input Registers
+- HUMIDITY_REGISTER: Register address containing humidity (0–65535)
+- TEMPERATURE_REGISTER: Register address containing temperature (0–65535)
+- VALUE_DIVISOR: Divisor to scale raw values (e.g., 10 means raw/10.0)
+- SERIAL_TIMEOUT_MS: Per-request timeout in milliseconds
+- BACKOFF_INITIAL_MS: Initial backoff delay after an error (ms)
+- BACKOFF_MAX_MS: Maximum backoff delay after repeated errors (ms)
+
+HTTP API
+- GET /config
+  Returns current configuration (serial_port, slave_id, poll_interval_ms, and fixed 9600 8N1), plus register/function info.
+  Example:
+    curl -s http://localhost:8080/config | jq
+
+- PUT /config
+  Validates requested settings against environment-based configuration. Returns 200 if matching, 409 if not.
+  Example:
+    curl -s -X PUT http://localhost:8080/config \
+      -H 'Content-Type: application/json' \
+      -d '{"serial_port":"/dev/ttyUSB0","slave_id":1,"poll_interval_ms":1000}'
+
+- POST /polling/start
+  Starts periodic polling.
+  Example:
+    curl -s -X POST http://localhost:8080/polling/start
+
+- POST /polling/stop
+  Stops periodic polling and releases the serial port.
+  Example:
+    curl -s -X POST http://localhost:8080/polling/stop
+
 - GET /status
-  Reports connection state and current I²C address.
-  Example: curl -s http://localhost:8080/status
+  Returns polling and link health (polling, connected, last_poll_time, last_success_time, last_error, timeout_count, consecutive_timeouts).
+  Example:
+    curl -s http://localhost:8080/status | jq
 
-- GET /i2c
-  Returns current I²C address.
-  Example: curl -s http://localhost:8080/i2c
+- GET /readings/latest
+  Returns the most recent decoded measurement with timestamp and staleness flag.
+  Example:
+    curl -s http://localhost:8080/readings/latest | jq
 
-- PUT /i2c
-  Changes the I²C address (allowed: 0x40 or 0x41). Note: The physical sensor must match this setting.
-  Example: curl -s -X PUT http://localhost:8080/i2c -H 'Content-Type: application/json' -d '{"address":"0x41"}'
+Decoding Assumptions
+- The driver reads both humidity and temperature registers in one Modbus transaction starting at the lower of HUMIDITY_REGISTER and TEMPERATURE_REGISTER.
+- Raw values are divided by VALUE_DIVISOR. Temperature is treated as signed 16-bit.
 
-- GET /calibration
-  Returns current calibration offsets.
-  Example: curl -s http://localhost:8080/calibration
+Logging
+- Logs key events to stdout: server start, polling start/stop, serial open/close, errors, retries, and timestamped updates.
 
-- PUT /calibration
-  Sets calibration offsets (either field may be omitted to leave unchanged).
-  Body fields: temp_offset (°C), humidity_offset (%RH)
-  Example: curl -s -X PUT http://localhost:8080/calibration -H 'Content-Type: application/json' -d '{"temp_offset":0.2, "humidity_offset":-1.5}'
+Graceful Shutdown
+- CTRL+C or process stop will terminate the HTTP server and polling loop cleanly.
 
-- GET /readings
-  Returns the latest temperature (°C) and humidity (%RH). If disconnected, returns 503 with an error.
-  Example: curl -s http://localhost:8080/readings
-
-Notes
-- The driver communicates with the sensor over I²C on Linux using periph.io.
-- Periodic polling is fixed at every 2 seconds as required.
-- If the address does not match the physical sensor's configuration, /status will show disconnected and /readings will return 503.
+Security
+- No authentication is implemented. Deploy behind appropriate network controls if needed.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
