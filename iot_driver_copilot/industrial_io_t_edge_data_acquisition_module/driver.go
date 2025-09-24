@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,408 +15,330 @@ import (
 	"time"
 
 	"github.com/goburrow/modbus"
-	"github.com/goburrow/serial"
 )
 
-type Sample struct {
-	Protocol string    `json:"protocol"`
-	Table    string    `json:"table"`
-	SlaveID  uint8     `json:"slave_id"`
-	Address  uint16    `json:"address"`
-	Quantity uint16    `json:"quantity"`
-	Timestamp time.Time `json:"timestamp"`
-	DataBools []bool    `json:"bools,omitempty"`
-	DataRegs  []uint16  `json:"registers,omitempty"`
+type ReadSample struct {
+	Protocol   string        `json:"protocol"`
+	SlaveID    int           `json:"slave_id"`
+	Table      string        `json:"table"`
+	Address    int           `json:"address"`
+	Quantity   int           `json:"quantity"`
+	Timestamp  time.Time     `json:"timestamp"`
+	BoolValues []bool        `json:"bool_values,omitempty"`
+	RegValues  []uint16      `json:"reg_values,omitempty"`
+	Source     string        `json:"source"` // cache or live
 }
 
-type Status struct {
-	Connected  bool      `json:"connected"`
-	LastError  string    `json:"last_error,omitempty"`
-	LastUpdate time.Time `json:"last_update"`
-	Retries    int       `json:"retries"`
-}
-
-type Buffer struct {
+type LatestBuffer struct {
 	mu     sync.RWMutex
-	sample Sample
-	status Status
+	sample *ReadSample
 }
 
-func (b *Buffer) Set(sample Sample, status Status) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.sample = sample
-	b.status = status
-}
-
-func (b *Buffer) Get() (Sample, Status) {
+func (b *LatestBuffer) Get() *ReadSample {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.sample, b.status
+	if b.sample == nil { return nil }
+	cp := *b.sample
+	return &cp
 }
 
-type Poller struct {
-	cfg    Config
-	buf    *Buffer
-	logger *log.Logger
+func (b *LatestBuffer) Set(s *ReadSample) {
+	b.mu.Lock()
+	b.sample = s
+	b.mu.Unlock()
 }
 
-func newPoller(cfg Config, buf *Buffer, logger *log.Logger) *Poller {
-	return &Poller{cfg: cfg, buf: buf, logger: logger}
-}
+// Global buffer for latest polled sample
+var latest LatestBuffer
 
-func (p *Poller) run(ctx context.Context) {
-	backoff := p.cfg.RetryBaseBackoff
-	consecutiveFailures := 0
-
-	for {
-		select {
-		case <-ctx.Done():
-			p.logger.Printf("poller stopping")
-			return
-		default:
-		}
-
-		client, closer, err := p.makeClient()
-		if err != nil {
-			p.logger.Printf("modbus client create error: %v", err)
-			consecutiveFailures++
-			p.updateStatus(false, err, consecutiveFailures)
-			backoff = nextBackoff(backoff, p.cfg.RetryBaseBackoff, p.cfg.RetryMaxBackoff)
-			sleepWithCtx(ctx, backoff)
-			continue
-		}
-
-		// Perform read
-		start := time.Now()
-		var dataBytes []byte
-		var readErr error
-		switch p.cfg.Table {
-		case "coil":
-			dataBytes, readErr = client.ReadCoils(uint16(p.cfg.Address), uint16(p.cfg.Quantity))
-		case "discrete":
-			dataBytes, readErr = client.ReadDiscreteInputs(uint16(p.cfg.Address), uint16(p.cfg.Quantity))
-		case "input":
-			dataBytes, readErr = client.ReadInputRegisters(uint16(p.cfg.Address), uint16(p.cfg.Quantity))
-		case "holding":
-			dataBytes, readErr = client.ReadHoldingRegisters(uint16(p.cfg.Address), uint16(p.cfg.Quantity))
-		default:
-			readErr = fmt.Errorf("unsupported table: %s", p.cfg.Table)
-		}
-		if readErr != nil {
-			p.logger.Printf("modbus read error: %v", readErr)
-			consecutiveFailures++
-			p.updateStatus(false, readErr, consecutiveFailures)
-			if closer != nil { closer() }
-			backoff = nextBackoff(backoff, p.cfg.RetryBaseBackoff, p.cfg.RetryMaxBackoff)
-			sleepWithCtx(ctx, backoff)
-			if p.cfg.RetryMax > 0 && consecutiveFailures >= p.cfg.RetryMax {
-				// After reaching max retries, give a longer pause at max backoff then reset counter
-				sleepWithCtx(ctx, p.cfg.RetryMaxBackoff)
-				consecutiveFailures = 0
-				backoff = p.cfg.RetryBaseBackoff
-			}
-			continue
-		}
-
-		// Decode and update buffer
-		sample := Sample{
-			Protocol: p.cfg.Protocol,
-			Table:    p.cfg.Table,
-			SlaveID:  p.cfg.SlaveID,
-			Address:  p.cfg.Address,
-			Quantity: p.cfg.Quantity,
-			Timestamp: time.Now(),
-		}
-		if p.cfg.Table == "coil" || p.cfg.Table == "discrete" {
-			bools := bytesToBools(dataBytes, int(p.cfg.Quantity))
-			sample.DataBools = bools
-		} else {
-			sample.DataRegs = bytesToU16(dataBytes)
-		}
-		status := Status{Connected: true, LastError: "", LastUpdate: sample.Timestamp, Retries: 0}
-		p.buf.Set(sample, status)
-		p.logger.Printf("modbus read ok: table=%s addr=%d qty=%d dur=%s", p.cfg.Table, p.cfg.Address, p.cfg.Quantity, time.Since(start))
-
-		// Reset failure counters and backoff
-		consecutiveFailures = 0
-		backoff = p.cfg.RetryBaseBackoff
-
-		// Sleep until next poll or context cancel
-		sleepWithCtx(ctx, p.cfg.PollInterval)
-		if closer != nil { closer() }
-	}
-}
-
-func (p *Poller) updateStatus(connected bool, err error, retries int) {
-	lastErr := ""
-	if err != nil { lastErr = err.Error() }
-	p.buf.Set(p.buf.sample, Status{Connected: connected, LastError: lastErr, LastUpdate: time.Now(), Retries: retries})
-}
-
-func (p *Poller) makeClient() (modbus.Client, func(), error) {
-	if p.cfg.Protocol == "tcp" {
-		addr := fmt.Sprintf("%s:%d", p.cfg.TCPHost, p.cfg.TCPPort)
-		h := modbus.NewTCPClientHandler(addr)
-		h.Timeout = p.cfg.Timeout
-		h.SlaveId = p.cfg.SlaveID
-		if err := h.Connect(); err != nil {
-			return nil, nil, err
-		}
-		client := modbus.NewClient(h)
-		closer := func() { _ = h.Close() }
-		return client, closer, nil
-	}
-	// RTU
-	parity := serial.ParityNone
-	switch strings.ToUpper(p.cfg.Parity) {
-	case "N": parity = serial.ParityNone
-	case "E": parity = serial.ParityEven
-	case "O": parity = serial.ParityOdd
-	}
-	stopBits := serial.Stop1
-	if p.cfg.StopBits == 2 { stopBits = serial.Stop2 }
-
-	h := modbus.NewRTUClientHandler(p.cfg.SerialPort)
-	h.Timeout = p.cfg.Timeout
-	h.SlaveId = p.cfg.SlaveID
-	h.BaudRate = p.cfg.BaudRate
-	h.DataBits = p.cfg.DataBits
-	h.Parity = parity
-	h.StopBits = stopBits
+// Build a Modbus client based on provided parameters
+func buildTCPClient(host string, port int, slaveID int, timeoutMs int) (*modbus.TCPClientHandler, modbus.Client, error) {
+	h := modbus.NewTCPClientHandler(fmt.Sprintf("%s:%d", host, port))
+	h.Timeout = time.Duration(timeoutMs) * time.Millisecond
+	h.SlaveId = byte(slaveID)
 	if err := h.Connect(); err != nil {
 		return nil, nil, err
 	}
 	client := modbus.NewClient(h)
-	closer := func() { _ = h.Close() }
-	return client, closer, nil
+	return h, client, nil
 }
 
-func bytesToBools(b []byte, quantity int) []bool {
-	res := make([]bool, quantity)
+func buildRTUClient(serialPort string, baud, dataBits, stopBits int, parity string, slaveID int, timeoutMs int) (*modbus.RTUClientHandler, modbus.Client, error) {
+	h := modbus.NewRTUClientHandler(serialPort)
+	h.BaudRate = baud
+	h.DataBits = dataBits
+	h.StopBits = stopBits
+	h.Parity = parity
+	h.SlaveId = byte(slaveID)
+	h.Timeout = time.Duration(timeoutMs) * time.Millisecond
+	if err := h.Connect(); err != nil {
+		return nil, nil, err
+	}
+	client := modbus.NewClient(h)
+	return h, client, nil
+}
+
+func decodeCoils(data []byte, quantity int) []bool {
+	vals := make([]bool, 0, quantity)
 	for i := 0; i < quantity; i++ {
-		byteIdx := i / 8
-		bitIdx := uint(i % 8)
-		if byteIdx < len(b) {
-			res[i] = (b[byteIdx] & (1 << bitIdx)) != 0
+		byteIndex := i / 8
+		bitIndex := uint(i % 8)
+		if byteIndex < len(data) {
+			bit := (data[byteIndex] >> bitIndex) & 0x01
+			vals = append(vals, bit == 1)
+		} else {
+			vals = append(vals, false)
 		}
 	}
-	return res
+	return vals
 }
 
-func bytesToU16(b []byte) []uint16 {
-	n := len(b) / 2
-	res := make([]uint16, n)
-	for i := 0; i < n; i++ {
-		res[i] = binary.BigEndian.Uint16(b[i*2 : i*2+2])
+func decodeRegisters(data []byte) []uint16 {
+	regs := make([]uint16, 0, len(data)/2)
+	for i := 0; i+1 < len(data); i += 2 {
+		regs = append(regs, uint16(data[i])<<8|uint16(data[i+1]))
 	}
-	return res
+	return regs
 }
 
-func nextBackoff(cur, base, max time.Duration) time.Duration {
-	next := cur * 2
-	if next < base { next = base }
-	if next > max { next = max }
-	return next
-}
-
-func sleepWithCtx(ctx context.Context, d time.Duration) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
+func readOnce(client modbus.Client, table string, address, quantity int) (*ReadSample, error) {
+	addr := uint16(address)
+	qty := uint16(quantity)
+	var (
+		raw []byte
+		err error
+	)
+	s := &ReadSample{Table: table, Address: address, Quantity: quantity, Timestamp: time.Now()}
+	switch strings.ToLower(table) {
+	case "coil":
+		raw, err = client.ReadCoils(addr, qty)
+		if err != nil { return nil, err }
+		s.BoolValues = decodeCoils(raw, quantity)
+	case "discrete":
+		raw, err = client.ReadDiscreteInputs(addr, qty)
+		if err != nil { return nil, err }
+		s.BoolValues = decodeCoils(raw, quantity)
+	case "input":
+		raw, err = client.ReadInputRegisters(addr, qty)
+		if err != nil { return nil, err }
+		s.RegValues = decodeRegisters(raw)
+	case "holding":
+		raw, err = client.ReadHoldingRegisters(addr, qty)
+		if err != nil { return nil, err }
+		s.RegValues = decodeRegisters(raw)
+	default:
+		return nil, fmt.Errorf("invalid table: %s", table)
 	}
+	return s, nil
+}
+
+func startBackgroundCollector(ctx context.Context, cfg Config) {
+	go func() {
+		log.Printf("collector: starting with protocol=%s slave=%d poll=%s[%d,%d] interval=%dms", cfg.ModbusProtocol, cfg.SlaveID, cfg.PollTable, cfg.PollAddress, cfg.PollQuantity, cfg.PollIntervalMs)
+		attempt := 0
+		backoff := time.Duration(cfg.RetryInitialMs) * time.Millisecond
+		maxBackoff := time.Duration(cfg.RetryMaxMs) * time.Millisecond
+		var (
+			tcpH *modbus.TCPClientHandler
+			rtuH *modbus.RTUClientHandler
+			client modbus.Client
+		)
+		connected := false
+
+		connect := func() error {
+			if cfg.ModbusProtocol == "tcp" {
+				var err error
+				tcpH, client, err = buildTCPClient(cfg.DeviceHost, cfg.DevicePort, cfg.SlaveID, cfg.TimeoutMs)
+				if err != nil { return err }
+			} else {
+				var err error
+				rtuH, client, err = buildRTUClient(cfg.SerialPort, cfg.SerialBaud, cfg.SerialDataBits, cfg.SerialStopBits, cfg.SerialParity, cfg.SlaveID, cfg.TimeoutMs)
+				if err != nil { return err }
+			}
+			connected = true
+			attempt = 0
+			backoff = time.Duration(cfg.RetryInitialMs) * time.Millisecond
+			log.Printf("collector: connected")
+			return nil
+		}
+
+		closeConn := func() {
+			if tcpH != nil { tcpH.Close(); tcpH = nil }
+			if rtuH != nil { rtuH.Close(); rtuH = nil }
+			client = nil
+			connected = false
+			log.Printf("collector: disconnected")
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				closeConn()
+				log.Printf("collector: stopped")
+				return
+			default:
+			}
+
+			if !connected {
+				if err := connect(); err != nil {
+					attempt++
+					log.Printf("collector: connect failed (attempt %d): %v", attempt, err)
+					time.Sleep(backoff)
+					backoff *= 2
+					if backoff > maxBackoff { backoff = maxBackoff }
+					continue
+				}
+			}
+
+			// Perform read
+			s, err := readOnce(client, cfg.PollTable, cfg.PollAddress, cfg.PollQuantity)
+			if err != nil {
+				log.Printf("collector: read error: %v", err)
+				closeConn()
+				attempt++
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff { backoff = maxBackoff }
+				continue
+			}
+			s.Protocol = cfg.ModbusProtocol
+			s.SlaveID = cfg.SlaveID
+			s.Source = "cache"
+			latest.Set(s)
+			log.Printf("collector: updated %s[%d,%d] at %s", s.Table, s.Address, s.Quantity, s.Timestamp.Format(time.RFC3339))
+			time.Sleep(time.Duration(cfg.PollIntervalMs) * time.Millisecond)
+		}
+	}()
+}
+
+func parseQueryInt(r *http.Request, key string) (int, bool, error) {
+	v := r.URL.Query().Get(key)
+	if v == "" { return 0, false, nil }
+	iv, err := strconv.Atoi(v)
+	if err != nil { return 0, false, err }
+	return iv, true, nil
+}
+
+func modbusReadHandler(cfg Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		protocol := q.Get("protocol")
+		if protocol == "" { protocol = cfg.ModbusProtocol }
+		protocol = strings.ToLower(protocol)
+		if protocol != "tcp" && protocol != "rtu" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "{\"error\":\"invalid protocol\"}")
+			return
+		}
+
+		// Defaults from env
+		host := cfg.DeviceHost
+		port := cfg.DevicePort
+		serialPort := cfg.SerialPort
+		slaveID := cfg.SlaveID
+		timeoutMs := cfg.TimeoutMs
+
+		if hv := q.Get("host"); hv != "" { host = hv }
+		if pv, ok, err := parseQueryInt(r, "port"); err == nil && ok { port = pv }
+		if sp := q.Get("serial_port"); sp != "" { serialPort = sp }
+		if sid, ok, err := parseQueryInt(r, "slave_id"); err == nil && ok { slaveID = sid }
+		if to, ok, err := parseQueryInt(r, "timeout_ms"); err == nil && ok { timeoutMs = to }
+
+		table := q.Get("table")
+		if table == "" { table = cfg.PollTable }
+		address, okAddr, err := parseQueryInt(r, "address")
+		if err != nil { w.WriteHeader(http.StatusBadRequest); fmt.Fprintf(w, "{\"error\":\"invalid address\"}"); return }
+		if !okAddr { address = cfg.PollAddress }
+		quantity, okQty, err := parseQueryInt(r, "quantity")
+		if err != nil { w.WriteHeader(http.StatusBadRequest); fmt.Fprintf(w, "{\"error\":\"invalid quantity\"}"); return }
+		if !okQty { quantity = cfg.PollQuantity }
+
+		// If request matches the cache, serve cached
+		if protocol == cfg.ModbusProtocol && slaveID == cfg.SlaveID && strings.ToLower(table) == strings.ToLower(cfg.PollTable) && address == cfg.PollAddress && quantity == cfg.PollQuantity {
+			if s := latest.Get(); s != nil {
+				resp := *s
+				resp.Source = "cache"
+				writeJSON(w, resp)
+				return
+			}
+		}
+
+		// Live read with temporary client
+		var (
+			client modbus.Client
+			closer interface{ Close() error }
+			buildErr error
+		)
+		if protocol == "tcp" {
+			var h *modbus.TCPClientHandler
+			h, client, buildErr = buildTCPClient(host, port, slaveID, timeoutMs)
+			closer = h
+		} else {
+			var h *modbus.RTUClientHandler
+			h, client, buildErr = buildRTUClient(serialPort, cfg.SerialBaud, cfg.SerialDataBits, cfg.SerialStopBits, cfg.SerialParity, slaveID, timeoutMs)
+			closer = h
+		}
+		if buildErr != nil {
+			log.Printf("http: connect error: %v", buildErr)
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprintf(w, "{\"error\":\"connect failed\"}")
+			return
+		}
+		defer closer.Close()
+
+		s, err := readOnce(client, table, address, quantity)
+		if err != nil {
+			log.Printf("http: read error: %v", err)
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprintf(w, "{\"error\":\"read failed\"}")
+			return
+		}
+		s.Protocol = protocol
+		s.SlaveID = slaveID
+		s.Source = "live"
+		writeJSON(w, s)
+	}
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(true)
+	enc.Encode(v)
 }
 
 func main() {
-	logger := log.New(os.Stdout, "", log.LstdFlags)
-	cfg, err := LoadConfigFromEnv()
+	cfg, err := loadConfig()
 	if err != nil {
-		logger.Fatalf("config error: %v", err)
+		log.Fatalf("config error: %v", err)
 	}
 
-	buf := &Buffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	poller := newPoller(cfg, buf, logger)
-	go poller.run(ctx)
+	startBackgroundCollector(ctx, cfg)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/modbus/read", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		q := r.URL.Query()
-		// If protocol provided in query, perform one-shot live read; else return cached sample
-		if proto := strings.ToLower(q.Get("protocol")); proto == "tcp" || proto == "rtu" {
-			resp, code := handleLiveRead(ctx, q, logger)
-			w.WriteHeader(code)
-			_ = json.NewEncoder(w).Encode(resp)
-			return
-		}
+	http.HandleFunc("/modbus/read", modbusReadHandler(cfg))
 
-		sample, status := buf.Get()
-		if sample.Timestamp.IsZero() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error": "no data yet",
-				"diagnostics": status,
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"source": "cache",
-			"sample": sample,
-			"diagnostics": status,
-		})
-	})
-
-	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.HTTPHost, cfg.HTTPPort),
-		Handler: mux,
-	}
+	server := &http.Server{ Addr: fmt.Sprintf("%s:%d", cfg.HTTPHost, cfg.HTTPPort) }
 
 	go func() {
-		logger.Printf("http server starting at %s:%d", cfg.HTTPHost, cfg.HTTPPort)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatalf("http server error: %v", err)
+		log.Printf("http: serving on %s:%d", cfg.HTTPHost, cfg.HTTPPort)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http server error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	logger.Printf("signal received: %s, shutting down", sig.String())
-	cancel()
+	<-sigCh
+	log.Printf("shutdown: received signal, stopping...")
+
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
-	_ = httpSrv.Shutdown(shutdownCtx)
-	logger.Printf("shutdown complete")
-}
-
-func handleLiveRead(ctx context.Context, q map[string][]string, logger *log.Logger) (map[string]any, int) {
-	protocol := strings.ToLower(getOne(q, "protocol"))
-	if err := ValidateQueryProtocol(protocol); err != nil {
-		return map[string]any{"error": err.Error()}, http.StatusBadRequest
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http shutdown error: %v", err)
 	}
-
-	var (
-		client modbus.Client
-		closer func()
-		err error
-	)
-
-	timeoutMs := parseIntDefault(getOne(q, "timeout_ms"), 0)
-	if timeoutMs <= 0 {
-		return map[string]any{"error": "timeout_ms must be > 0 for live reads"}, http.StatusBadRequest
-	}
-	if protocol == "tcp" {
-		host := getOne(q, "host")
-		portStr := getOne(q, "port")
-		if host == "" || portStr == "" { return map[string]any{"error": "host and port required for tcp"}, http.StatusBadRequest }
-		port, err := strconv.Atoi(portStr)
-		if err != nil { return map[string]any{"error": "invalid port"}, http.StatusBadRequest }
-		h := modbus.NewTCPClientHandler(fmt.Sprintf("%s:%d", host, port))
-		h.Timeout = time.Duration(timeoutMs) * time.Millisecond
-		h.SlaveId = uint8(parseIntDefault(getOne(q, "slave_id"), 1))
-		if err = h.Connect(); err != nil {
-			return map[string]any{"error": fmt.Sprintf("connect error: %v", err)}, http.StatusBadGateway
-		}
-		client = modbus.NewClient(h)
-		closer = func() { _ = h.Close() }
-	} else {
-		serialPort := getOne(q, "serial_port")
-		baud := parseIntDefault(getOne(q, "baud"), 0)
-		parity := strings.ToUpper(getOne(q, "parity"))
-		stopBits := parseIntDefault(getOne(q, "stop_bits"), 0)
-		dataBits := parseIntDefault(getOne(q, "data_bits"), 8)
-		if serialPort == "" || baud <= 0 || (parity != "N" && parity != "E" && parity != "O") || (stopBits != 1 && stopBits != 2) {
-			return map[string]any{"error": "invalid rtu params: require serial_port, baud>0, parity N|E|O, stop_bits 1|2"}, http.StatusBadRequest
-		}
-		par := serial.ParityNone
-		switch parity { case "N": par = serial.ParityNone; case "E": par = serial.ParityEven; case "O": par = serial.ParityOdd }
-		stb := serial.Stop1; if stopBits == 2 { stb = serial.Stop2 }
-		h := modbus.NewRTUClientHandler(serialPort)
-		h.Timeout = time.Duration(timeoutMs) * time.Millisecond
-		h.SlaveId = uint8(parseIntDefault(getOne(q, "slave_id"), 1))
-		h.BaudRate = baud
-		h.DataBits = dataBits
-		h.Parity = par
-		h.StopBits = stb
-		if err = h.Connect(); err != nil {
-			return map[string]any{"error": fmt.Sprintf("connect error: %v", err)}, http.StatusBadGateway
-		}
-		client = modbus.NewClient(h)
-		closer = func() { _ = h.Close() }
-	}
-	defer func() { if closer != nil { closer() } }()
-
-	slaveID := uint8(parseIntDefault(getOne(q, "slave_id"), 1))
-	_ = slaveID // already set on handler
-
-	table := strings.ToLower(getOne(q, "table"))
-	if table != "coil" && table != "discrete" && table != "input" && table != "holding" {
-		return map[string]any{"error": "table must be coil|discrete|input|holding"}, http.StatusBadRequest
-	}
-	address := parseIntDefault(getOne(q, "address"), 0)
-	quantity := parseIntDefault(getOne(q, "quantity"), 1)
-	if quantity <= 0 || quantity > 125 {
-		return map[string]any{"error": "quantity must be 1-125"}, http.StatusBadRequest
-	}
-
-	var dataBytes []byte
-	var readErr error
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel()
-	// Perform read (no separate context in goburrow; timeout set on handler)
-	switch table {
-	case "coil":
-		dataBytes, readErr = client.ReadCoils(uint16(address), uint16(quantity))
-	case "discrete":
-		dataBytes, readErr = client.ReadDiscreteInputs(uint16(address), uint16(quantity))
-	case "input":
-		dataBytes, readErr = client.ReadInputRegisters(uint16(address), uint16(quantity))
-	case "holding":
-		dataBytes, readErr = client.ReadHoldingRegisters(uint16(address), uint16(quantity))
-	}
-	if readErr != nil {
-		return map[string]any{"error": fmt.Sprintf("read error: %v", readErr)}, http.StatusBadGateway
-	}
-
-	sample := Sample{
-		Protocol: protocol,
-		Table:    table,
-		SlaveID:  slaveID,
-		Address:  uint16(address),
-		Quantity: uint16(quantity),
-		Timestamp: time.Now(),
-	}
-	if table == "coil" || table == "discrete" {
-		sample.DataBools = bytesToBools(dataBytes, quantity)
-	} else {
-		sample.DataRegs = bytesToU16(dataBytes)
-	}
-
-	return map[string]any{
-		"source": "live",
-		"sample": sample,
-		"diagnostics": map[string]any{
-			"connected": true,
-			"last_error": "",
-			"last_update": sample.Timestamp,
-			"retries": 0,
-		},
-	}, http.StatusOK
-}
-
-func getOne(q map[string][]string, key string) string {
-	vals := q[key]
-	if len(vals) > 0 { return vals[0] }
-	return ""
-}
-
-func parseIntDefault(s string, def int) int {
-	if s == "" { return def }
-	v, err := strconv.Atoi(s)
-	if err != nil { return def }
-	return v
+	cancel()
+	log.Printf("stopped")
 }

@@ -1,8 +1,5 @@
 module daq2000-driver
 
-go 1.21
+go 1.20
 
-require (
-	github.com/goburrow/modbus v0.1.3
-	github.com/goburrow/serial v0.1.2
-)
+require github.com/goburrow/modbus v0.2.1
