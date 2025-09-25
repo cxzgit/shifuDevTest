@@ -5,230 +5,117 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type Config struct {
-	// HTTP
 	HTTPHost string
-	HTTPPort int
-
-	// Protocol selection: "tcp" or "rtu"
-	Protocol string
+	HTTPPort string
 
 	// Modbus TCP
-	ModbusTCPAddr string // host:port
-	TCPTimeout    time.Duration
+	ModbusTCPAddr   string // host:port
+	ModbusUnitID    byte
+	RequestTimeout  time.Duration
+	AcqInterval     time.Duration
+	BackoffInitial  time.Duration
+	BackoffMax      time.Duration
+	BufferSize      int
+	OnlineTTLSec    int
 
-	// Modbus RTU
-	SerialPort string
-	BaudRate   int
-	DataBits   int
-	Parity     string // N/E/O
-	StopBits   int    // 1/2
+	// Publish interval via Modbus (optional)
+	ModbusPubIntervalReg   *uint16
+	ModbusPubIntervalScale int
 
-	// Common Modbus
-	SlaveID uint8
-
-	// Acquisition
-	PollInterval time.Duration
-
-	// Read ranges
-	ReadHoldingStart   int
-	ReadHoldingCount   int
-	ReadInputStart     int
-	ReadInputCount     int
-	ReadCoilStart      int
-	ReadCoilCount      int
-	ReadDiscreteStart  int
-	ReadDiscreteCount  int
-
-	// Retry/backoff
-	RetryInitial time.Duration
-	RetryMax     time.Duration
-
-	// MQTT (optional)
-	MQTTBroker    string
-	MQTTClientID  string
-	MQTTUsername  string
-	MQTTPassword  string
-	MQTTTopic     string
-	MQTTKeepAlive time.Duration
+	// MQTT (optional, for /config/publish)
+	MQTTBroker      string // e.g., tcp://localhost:1883
+	MQTTClientID    string
+	MQTTUsername    string
+	MQTTPassword    string
+	MQTTCommandTopic string // e.g., device/cmd/config
 }
 
-func getenv(key, def string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	return v
-}
-
-func atoiEnv(key string, def int) (int, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return def, nil
-	}
-	i, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
-	}
-	return i, nil
-}
-
-func durMsEnv(key string, defMs int) (time.Duration, error) {
-	i, err := atoiEnv(key, defMs)
-	if err != nil {
-		return 0, err
-	}
-	return time.Duration(i) * time.Millisecond, nil
-}
-
-func LoadConfigFromEnv() (*Config, error) {
+func LoadConfig() (*Config, error) {
 	cfg := &Config{}
+	cfg.HTTPHost = getEnv("HTTP_HOST", "0.0.0.0")
+	cfg.HTTPPort = getEnv("HTTP_PORT", "8080")
 
-	cfg.HTTPHost = getenv("HTTP_HOST", "0.0.0.0")
-	port, err := atoiEnv("HTTP_PORT", 8080)
-	if err != nil {
-		return nil, err
+	cfg.ModbusTCPAddr = os.Getenv("MODBUS_TCP_ADDR")
+	if cfg.ModbusTCPAddr == "" {
+		return nil, errors.New("MODBUS_TCP_ADDR is required")
 	}
-	cfg.HTTPPort = port
+	unit := getEnv("MODBUS_UNIT_ID", "1")
+	uid64, err := strconv.ParseUint(unit, 10, 8)
+	if err != nil {
+		return nil, fmt.Errorf("invalid MODBUS_UNIT_ID: %w", err)
+	}
+	cfg.ModbusUnitID = byte(uid64)
 
-	cfg.Protocol = strings.ToLower(getenv("PROTOCOL", ""))
-	cfg.ModbusTCPAddr = getenv("MODBUS_TCP_ADDR", "")
+	rt := getEnv("REQUEST_TIMEOUT_MS", "1000")
+	rtMs, err := strconv.Atoi(rt)
+	if err != nil || rtMs <= 0 {
+		return nil, fmt.Errorf("invalid REQUEST_TIMEOUT_MS: %v", rt)
+	}
+	cfg.RequestTimeout = time.Duration(rtMs) * time.Millisecond
 
-	tcpTimeout, err := durMsEnv("TCP_TIMEOUT_MS", 1000)
-	if err != nil {
-		return nil, err
+	acq := getEnv("ACQ_INTERVAL_MS", "200")
+	acqMs, err := strconv.Atoi(acq)
+	if err != nil || acqMs <= 0 {
+		return nil, fmt.Errorf("invalid ACQ_INTERVAL_MS: %v", acq)
 	}
-	cfg.TCPTimeout = tcpTimeout
+	cfg.AcqInterval = time.Duration(acqMs) * time.Millisecond
 
-	cfg.SerialPort = getenv("SERIAL_PORT", "")
-	baud, err := atoiEnv("BAUD_RATE", 9600)
-	if err != nil {
-		return nil, err
+	bi := getEnv("BACKOFF_INITIAL_MS", "500")
+	biMs, err := strconv.Atoi(bi)
+	if err != nil || biMs <= 0 {
+		return nil, fmt.Errorf("invalid BACKOFF_INITIAL_MS: %v", bi)
 	}
-	cfg.BaudRate = baud
-	dataBits, err := atoiEnv("DATA_BITS", 8)
-	if err != nil {
-		return nil, err
-	}
-	cfg.DataBits = dataBits
-	cfg.Parity = strings.ToUpper(getenv("PARITY", "N"))
-	stopBits, err := atoiEnv("STOP_BITS", 1)
-	if err != nil {
-		return nil, err
-	}
-	cfg.StopBits = stopBits
+	cfg.BackoffInitial = time.Duration(biMs) * time.Millisecond
 
-	sid, err := atoiEnv("SLAVE_ID", 1)
-	if err != nil {
-		return nil, err
+	bm := getEnv("BACKOFF_MAX_MS", "10000")
+	bmMs, err := strconv.Atoi(bm)
+	if err != nil || bmMs <= 0 {
+		return nil, fmt.Errorf("invalid BACKOFF_MAX_MS: %v", bm)
 	}
-	if sid < 0 || sid > 247 {
-		return nil, errors.New("SLAVE_ID must be in 0..247")
-	}
-	cfg.SlaveID = uint8(sid)
+	cfg.BackoffMax = time.Duration(bmMs) * time.Millisecond
 
-	poll, err := durMsEnv("POLL_INTERVAL_MS", 1000)
-	if err != nil {
-		return nil, err
+	bs := getEnv("BUFFER_SIZE", "256")
+	bsN, err := strconv.Atoi(bs)
+	if err != nil || bsN <= 0 {
+		return nil, fmt.Errorf("invalid BUFFER_SIZE: %v", bs)
 	}
-	// enforce update interval <= 1s
-	if poll > 1000*time.Millisecond {
-		poll = 1000 * time.Millisecond
-	}
-	if poll < 50*time.Millisecond {
-		poll = 50 * time.Millisecond
-	}
-	cfg.PollInterval = poll
+	cfg.BufferSize = bsN
 
-	cfg.ReadHoldingStart, err = atoiEnv("READ_HOLDING_START", 0)
-	if err != nil {
-		return nil, err
+	ot := getEnv("ONLINE_TTL_SEC", "5")
+	otN, err := strconv.Atoi(ot)
+	if err != nil || otN <= 0 {
+		return nil, fmt.Errorf("invalid ONLINE_TTL_SEC: %v", ot)
 	}
-	cfg.ReadHoldingCount, err = atoiEnv("READ_HOLDING_COUNT", 10)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadInputStart, err = atoiEnv("READ_INPUT_START", 0)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadInputCount, err = atoiEnv("READ_INPUT_COUNT", 0)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadCoilStart, err = atoiEnv("READ_COIL_START", 0)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadCoilCount, err = atoiEnv("READ_COIL_COUNT", 0)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadDiscreteStart, err = atoiEnv("READ_DISCRETE_START", 0)
-	if err != nil {
-		return nil, err
-	}
-	cfg.ReadDiscreteCount, err = atoiEnv("READ_DISCRETE_COUNT", 0)
-	if err != nil {
-		return nil, err
-	}
+	cfg.OnlineTTLSec = otN
 
-	retryInit, err := durMsEnv("RETRY_INITIAL_MS", 500)
-	if err != nil {
-		return nil, err
-	}
-	retryMax, err := durMsEnv("RETRY_MAX_MS", 10000)
-	if err != nil {
-		return nil, err
-	}
-	if retryMax < retryInit {
-		retryMax = retryInit
-	}
-	cfg.RetryInitial = retryInit
-	cfg.RetryMax = retryMax
-
-	cfg.MQTTBroker = getenv("MQTT_BROKER", "")
-	cfg.MQTTClientID = getenv("MQTT_CLIENT_ID", "")
-	cfg.MQTTUsername = getenv("MQTT_USERNAME", "")
-	cfg.MQTTPassword = getenv("MQTT_PASSWORD", "")
-	cfg.MQTTTopic = getenv("MQTT_TOPIC", "")
-	kaSec, err := atoiEnv("MQTT_KEEPALIVE_S", 30)
-	if err != nil {
-		return nil, err
-	}
-	cfg.MQTTKeepAlive = time.Duration(kaSec) * time.Second
-
-	// Auto-detect protocol if not specified
-	if cfg.Protocol == "" {
-		if cfg.ModbusTCPAddr != "" {
-			cfg.Protocol = "tcp"
-		} else if cfg.SerialPort != "" {
-			cfg.Protocol = "rtu"
-		} else {
-			return nil, errors.New("must set PROTOCOL or provide MODBUS_TCP_ADDR or SERIAL_PORT")
+	// Optional: Modbus register for publish interval
+	if regStr := os.Getenv("MODBUS_PUB_INTERVAL_REG"); regStr != "" {
+		regVal, err := strconv.ParseUint(regStr, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MODBUS_PUB_INTERVAL_REG: %v", regStr)
 		}
+		reg := uint16(regVal)
+		cfg.ModbusPubIntervalReg = &reg
 	}
-	if cfg.Protocol != "tcp" && cfg.Protocol != "rtu" {
-		return nil, errors.New("PROTOCOL must be 'tcp' or 'rtu'")
+	scaleStr := getEnv("MODBUS_PUB_INTERVAL_SCALE", "1")
+	scale, err := strconv.Atoi(scaleStr)
+	if err != nil || scale <= 0 {
+		return nil, fmt.Errorf("invalid MODBUS_PUB_INTERVAL_SCALE: %v", scaleStr)
 	}
+	cfg.ModbusPubIntervalScale = scale
 
-	if cfg.Protocol == "tcp" && cfg.ModbusTCPAddr == "" {
-		return nil, errors.New("MODBUS_TCP_ADDR required for tcp protocol")
-	}
-	if cfg.Protocol == "rtu" && cfg.SerialPort == "" {
-		return nil, errors.New("SERIAL_PORT required for rtu protocol")
-	}
-
-	if strings.IndexByte("NEO", cfg.Parity[0]) == -1 {
-		return nil, errors.New("PARITY must be N/E/O")
-	}
-	if cfg.StopBits != 1 && cfg.StopBits != 2 {
-		return nil, errors.New("STOP_BITS must be 1 or 2")
-	}
+	// MQTT optional
+	cfg.MQTTBroker = os.Getenv("MQTT_BROKER")
+	cfg.MQTTClientID = getEnv("MQTT_CLIENT_ID", "daq-driver")
+	cfg.MQTTUsername = os.Getenv("MQTT_USERNAME")
+	cfg.MQTTPassword = os.Getenv("MQTT_PASSWORD")
+	cfg.MQTTCommandTopic = os.Getenv("MQTT_COMMAND_TOPIC")
 
 	return cfg, nil
 }
+
+func getEnv(key, def string) string { v := os.Getenv(key); if v == "" { return def }; return v }

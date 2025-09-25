@@ -1,62 +1,63 @@
-Industrial IoT Edge Data Acquisition Module HTTP Driver (Modbus TCP to HTTP)
+Industrial IoT Edge DAQ Module Driver (HTTP)
 
 Overview
-- This driver connects to the Industrial IoT Edge Data Acquisition Module using its native Modbus TCP protocol, continuously polls input channels, and exposes a minimal HTTP API for consumption by browsers and CLI tools.
-- It performs protocol conversion (Modbus TCP → HTTP/JSON) and maintains a resilient background collection loop with timeout, retry, and exponential backoff.
+- This driver connects to the Industrial IoT Edge Data Acquisition Module using its native Modbus TCP protocol to continuously acquire real-time I/O data in the background. It also optionally connects to the device via MQTT to configure the device's MQTT publish interval. The driver exposes a small HTTP API for configuration and status checks.
+- It implements a resilient collection loop with timeouts, retries, and exponential backoff, maintains a thread-safe buffer with the latest samples, logs key events, and shuts down gracefully.
 
-Requirements
-- Node.js 16+ (recommended 18+)
-- Network reachability to the device over Modbus TCP
+Build and Run
+1) Set environment variables (see below)
+2) Build:
+   go build -o daq-driver
+3) Run:
+   ./daq-driver
 
-Environment Variables
-- HTTP_HOST: HTTP server bind address (default: 0.0.0.0)
-- HTTP_PORT: HTTP server port (default: 8080)
-- MODBUS_HOST: Device IP or hostname (required)
-- MODBUS_PORT: Modbus TCP port (default: 502)
-- MODBUS_ID: Modbus Unit ID/Slave ID (default: 1)
-- READ_TIMEOUT_MS: Per-request timeout in milliseconds (default: 1000)
-- POLL_INTERVAL_MS: Background polling interval in milliseconds (default: 100)
-- BACKOFF_MIN_MS: Minimum reconnect backoff in milliseconds (default: 500)
-- BACKOFF_MAX_MS: Maximum reconnect backoff in milliseconds (default: 10000)
-- ANALOG_CHANNELS: Number of analog input channels (default: 8)
-- ANALOG_REG_START: Starting register address for analog inputs (default: 0)
-- ANALOG_REG_TYPE: Register type for analog inputs: INPUT (FC4) or HOLDING (FC3). Default: INPUT
-- DIGITAL_INPUT_COUNT: Number of digital input channels (default: 4)
-- DIGITAL_INPUT_START: Starting address for digital inputs (default: 0)
-- ANALOG_SCALE: Optional comma-separated per-channel scale factors for analog inputs (length = ANALOG_CHANNELS). Default: 1 for all
-- ANALOG_OFFSET: Optional comma-separated per-channel offsets for analog inputs (length = ANALOG_CHANNELS). Default: 0 for all
+Required Environment Variables
+- MODBUS_TCP_ADDR: Modbus TCP address of the device (host:port), e.g. 192.168.1.50:502
 
-Install & Run
-1) Install dependencies
-   npm install
+HTTP Server Configuration
+- HTTP_HOST: Interface to bind (default: 0.0.0.0)
+- HTTP_PORT: Port to listen on (default: 8080)
 
-2) Set environment variables (example)
-   export MODBUS_HOST=192.168.1.50
-   export HTTP_PORT=8080
-   export POLL_INTERVAL_MS=100
+Modbus Acquisition Configuration
+- MODBUS_UNIT_ID: Modbus unit/slave ID (default: 1)
+- REQUEST_TIMEOUT_MS: Per-request timeout in ms (default: 1000)
+- ACQ_INTERVAL_MS: Acquisition interval in ms for polling (default: 200)
+- BACKOFF_INITIAL_MS: Initial reconnect backoff in ms (default: 500)
+- BACKOFF_MAX_MS: Maximum reconnect backoff in ms (default: 10000)
+- BUFFER_SIZE: Ring buffer capacity for recent samples (default: 256)
+- ONLINE_TTL_SEC: Consider device online if last successful read occurred within this many seconds (default: 5)
 
-3) Start the driver
-   npm start
+Optional: Configure Publish Interval via Modbus
+- MODBUS_PUB_INTERVAL_REG: Holding register address (decimal) to write the publish interval to. Writes a single 16-bit value.
+- MODBUS_PUB_INTERVAL_SCALE: Scale factor applied to interval_ms before writing to the register (default: 1). For example, set to 10 if the register expects tens of milliseconds. Note: interval_ms/scale must fit in 0..65535.
 
-HTTP API
-- GET /inputs/analog
-  - Returns the latest analog samples from all channels
-  - Example:
-    curl "http://localhost:8080/inputs/analog"
+Optional: Configure Publish Interval via MQTT
+- MQTT_BROKER: MQTT broker URL (e.g., tcp://localhost:1883). If set, the driver will establish an MQTT connection for configuration.
+- MQTT_CLIENT_ID: MQTT client ID (default: daq-driver)
+- MQTT_USERNAME: MQTT username (optional)
+- MQTT_PASSWORD: MQTT password (optional)
+- MQTT_COMMAND_TOPIC: MQTT topic to publish the configuration command to (e.g., device/cmd/config). The driver sends a JSON payload: {"interval_ms": <int>} with QoS 1.
 
-- GET /inputs/analog?channel_id=N
-  - Returns the latest analog sample for channel N (0-based)
-  - Example:
-    curl "http://localhost:8080/inputs/analog?channel_id=3"
-
+Exposed HTTP APIs
 - GET /status
-  - Returns module and driver status (reachability, configuration, last update timestamp)
-  - Example:
-    curl "http://localhost:8080/status"
+  Returns overall device health and connectivity, including network (online/offline), MQTT link status, acquisition state (running/stopped), buffer fill level, and last-update timestamp.
+  Example:
+    curl -s http://localhost:8080/status | jq .
+
+- PUT /config/publish
+  Configures MQTT data publishing interval for the device. The driver will use MQTT if MQTT_BROKER and MQTT_COMMAND_TOPIC are set. Otherwise, if MODBUS_PUB_INTERVAL_REG is set, it will write the interval to that Modbus register. Body must be JSON: {"interval_ms": 1000}
+  Examples:
+    Using MQTT:
+      curl -X PUT http://localhost:8080/config/publish \
+        -H 'Content-Type: application/json' \
+        -d '{"interval_ms": 1000}'
+    Using Modbus register:
+      curl -X PUT http://localhost:8080/config/publish \
+        -H 'Content-Type: application/json' \
+        -d '{"interval_ms": 500}'
 
 Notes
-- This driver polls the device using Modbus TCP and never exposes native protocol URLs.
-- It implements automatic reconnection with exponential backoff and timestamps every update.
-- Values returned for analog inputs are the raw register values optionally scaled/offset via environment variables.
+- Data acquisition is performed in the background and is not directly exposed via HTTP endpoints, but it informs status and readiness.
+- The driver never exposes native protocol endpoints; it converts device communication into a simple HTTP interface.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)

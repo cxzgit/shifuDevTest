@@ -1,9 +1,7 @@
 package main
 
 import (
-	contextpkg "context"
-	encodingjson "encoding/json"
-	"fmt"
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -13,71 +11,53 @@ import (
 )
 
 func main() {
-	cfg, err := LoadConfigFromEnv()
+	cfg, err := LoadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
 	}
 
-	ctx, cancel := contextpkg.WithCancel(contextpkg.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dm := NewDeviceManager(cfg)
-	if err := dm.Start(ctx); err != nil {
-		log.Fatalf("failed to start device manager: %v", err)
+	// MQTT manager (optional, only if broker provided)
+	var mqttMgr *MQTTManager
+	if cfg.MQTTBroker != "" {
+		mqttMgr, err = NewMQTTManager(cfg)
+		if err != nil {
+			log.Fatalf("mqtt init error: %v", err)
+		}
+		if err := mqttMgr.Connect(); err != nil {
+			log.Printf("mqtt connect error: %v", err)
+		}
+		defer mqttMgr.Close()
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		st := dm.SnapshotStatus()
-		w.Header().Set("Content-Type", "application/json")
-		enc := encodingjson.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(st)
-	})
+	// Device collector (Modbus TCP)
+	collector := NewCollector(cfg)
+	collector.Start(ctx)
+	defer collector.Stop()
 
-	srv := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", cfg.HTTPHost, cfg.HTTPPort),
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	// HTTP server
+	server := NewHTTPServer(cfg, collector, mqttMgr)
 
 	go func() {
-		logJSON("info", "http_server_start", map[string]any{
-			"addr": srv.Addr,
-		})
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logJSON("error", "http_server_error", map[string]any{"error": err.Error()})
-			cancel()
+		addr := cfg.HTTPHost + ":" + cfg.HTTPPort
+		log.Printf("HTTP listening on http://%s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http server error: %v", err)
 		}
 	}()
 
-	// Graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	logJSON("info", "shutdown_signal", nil)
-	cancel()
+	// graceful shutdown
+	sigC := make(chan os.Signal, 1)
+	signal.Notify(sigC, syscall.SIGINT, syscall.SIGTERM)
+	s := <-sigC
+	log.Printf("signal received: %v, shutting down", s)
 
-	shutdownCtx, shutdownCancel := contextpkg.WithTimeout(contextpkg.Background(), 10*time.Second)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logJSON("error", "http_server_shutdown_error", map[string]any{"error": err.Error()})
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http shutdown error: %v", err)
 	}
-	if err := dm.Stop(shutdownCtx); err != nil {
-		logJSON("error", "device_manager_stop_error", map[string]any{"error": err.Error()})
-	}
-	logJSON("info", "shutdown_complete", nil)
-}
-
-func logJSON(level, msg string, fields map[string]any) {
-	entry := map[string]any{
-		"ts":    time.Now().Format(time.RFC3339Nano),
-		"level": level,
-		"msg":   msg,
-	}
-	for k, v := range fields {
-		entry[k] = v
-	}
-	b, _ := encodingjson.Marshal(entry)
-	log.Println(string(b))
+	// collector and mqtt will be closed by defers/cancellation
 }
