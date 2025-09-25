@@ -1,183 +1,234 @@
 package main
 
 import (
-	"log"
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	HTTPHost               string
-	HTTPPort               int
+	// HTTP
+	HTTPHost string
+	HTTPPort int
 
-	UpdateIntervalMs       int
-	RequestTimeoutMs       int
-
-	RetryInitialBackoffMs  int
-	RetryMaxBackoffMs      int
-	RetryMultiplier        float64
+	// Protocol selection: "tcp" or "rtu"
+	Protocol string
 
 	// Modbus TCP
-	ModbusTCPAddr          string
-	ModbusTCPUnitID        uint8
+	ModbusTCPAddr string // host:port
+	TCPTimeout    time.Duration
 
 	// Modbus RTU
-	ModbusRTUPort          string
-	ModbusRTUBaud          int
-	ModbusRTUDataBits      int
-	ModbusRTUParity        string
-	ModbusRTUStopBits      int
-	ModbusRTUUnitID        uint8
+	SerialPort string
+	BaudRate   int
+	DataBits   int
+	Parity     string // N/E/O
+	StopBits   int    // 1/2
 
-	// Read configuration (addresses/counts)
-	ReadCoilsAddr          uint16
-	ReadCoilsCount         uint16
-	ReadDiscreteAddr       uint16
-	ReadDiscreteCount      uint16
-	ReadInputRegAddr       uint16
-	ReadInputRegCount      uint16
-	ReadHoldingRegAddr     uint16
-	ReadHoldingRegCount    uint16
+	// Common Modbus
+	SlaveID uint8
 
-	// Optional write ops on connect
-	WriteCoilEnable        bool
-	WriteCoilAddr          uint16
-	WriteCoilValue         bool
+	// Acquisition
+	PollInterval time.Duration
 
-	WriteRegEnable         bool
-	WriteRegAddr           uint16
-	WriteRegValue          uint16
+	// Read ranges
+	ReadHoldingStart   int
+	ReadHoldingCount   int
+	ReadInputStart     int
+	ReadInputCount     int
+	ReadCoilStart      int
+	ReadCoilCount      int
+	ReadDiscreteStart  int
+	ReadDiscreteCount  int
+
+	// Retry/backoff
+	RetryInitial time.Duration
+	RetryMax     time.Duration
 
 	// MQTT (optional)
-	MQTTBrokerURL          string
-	MQTTClientID           string
-	MQTTUsername           string
-	MQTTPassword           string
-	MQTTTopic              string
+	MQTTBroker    string
+	MQTTClientID  string
+	MQTTUsername  string
+	MQTTPassword  string
+	MQTTTopic     string
+	MQTTKeepAlive time.Duration
 }
 
 func getenv(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return v
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
+	return v
 }
 
-func getenvInt(key string, def int) int {
-	if v, ok := os.LookupEnv(key); ok {
-		if iv, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			return iv
+func atoiEnv(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return i, nil
+}
+
+func durMsEnv(key string, defMs int) (time.Duration, error) {
+	i, err := atoiEnv(key, defMs)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(i) * time.Millisecond, nil
+}
+
+func LoadConfigFromEnv() (*Config, error) {
+	cfg := &Config{}
+
+	cfg.HTTPHost = getenv("HTTP_HOST", "0.0.0.0")
+	port, err := atoiEnv("HTTP_PORT", 8080)
+	if err != nil {
+		return nil, err
+	}
+	cfg.HTTPPort = port
+
+	cfg.Protocol = strings.ToLower(getenv("PROTOCOL", ""))
+	cfg.ModbusTCPAddr = getenv("MODBUS_TCP_ADDR", "")
+
+	tcpTimeout, err := durMsEnv("TCP_TIMEOUT_MS", 1000)
+	if err != nil {
+		return nil, err
+	}
+	cfg.TCPTimeout = tcpTimeout
+
+	cfg.SerialPort = getenv("SERIAL_PORT", "")
+	baud, err := atoiEnv("BAUD_RATE", 9600)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BaudRate = baud
+	dataBits, err := atoiEnv("DATA_BITS", 8)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DataBits = dataBits
+	cfg.Parity = strings.ToUpper(getenv("PARITY", "N"))
+	stopBits, err := atoiEnv("STOP_BITS", 1)
+	if err != nil {
+		return nil, err
+	}
+	cfg.StopBits = stopBits
+
+	sid, err := atoiEnv("SLAVE_ID", 1)
+	if err != nil {
+		return nil, err
+	}
+	if sid < 0 || sid > 247 {
+		return nil, errors.New("SLAVE_ID must be in 0..247")
+	}
+	cfg.SlaveID = uint8(sid)
+
+	poll, err := durMsEnv("POLL_INTERVAL_MS", 1000)
+	if err != nil {
+		return nil, err
+	}
+	// enforce update interval <= 1s
+	if poll > 1000*time.Millisecond {
+		poll = 1000 * time.Millisecond
+	}
+	if poll < 50*time.Millisecond {
+		poll = 50 * time.Millisecond
+	}
+	cfg.PollInterval = poll
+
+	cfg.ReadHoldingStart, err = atoiEnv("READ_HOLDING_START", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadHoldingCount, err = atoiEnv("READ_HOLDING_COUNT", 10)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadInputStart, err = atoiEnv("READ_INPUT_START", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadInputCount, err = atoiEnv("READ_INPUT_COUNT", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadCoilStart, err = atoiEnv("READ_COIL_START", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadCoilCount, err = atoiEnv("READ_COIL_COUNT", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadDiscreteStart, err = atoiEnv("READ_DISCRETE_START", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReadDiscreteCount, err = atoiEnv("READ_DISCRETE_COUNT", 0)
+	if err != nil {
+		return nil, err
+	}
+
+	retryInit, err := durMsEnv("RETRY_INITIAL_MS", 500)
+	if err != nil {
+		return nil, err
+	}
+	retryMax, err := durMsEnv("RETRY_MAX_MS", 10000)
+	if err != nil {
+		return nil, err
+	}
+	if retryMax < retryInit {
+		retryMax = retryInit
+	}
+	cfg.RetryInitial = retryInit
+	cfg.RetryMax = retryMax
+
+	cfg.MQTTBroker = getenv("MQTT_BROKER", "")
+	cfg.MQTTClientID = getenv("MQTT_CLIENT_ID", "")
+	cfg.MQTTUsername = getenv("MQTT_USERNAME", "")
+	cfg.MQTTPassword = getenv("MQTT_PASSWORD", "")
+	cfg.MQTTTopic = getenv("MQTT_TOPIC", "")
+	kaSec, err := atoiEnv("MQTT_KEEPALIVE_S", 30)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MQTTKeepAlive = time.Duration(kaSec) * time.Second
+
+	// Auto-detect protocol if not specified
+	if cfg.Protocol == "" {
+		if cfg.ModbusTCPAddr != "" {
+			cfg.Protocol = "tcp"
+		} else if cfg.SerialPort != "" {
+			cfg.Protocol = "rtu"
+		} else {
+			return nil, errors.New("must set PROTOCOL or provide MODBUS_TCP_ADDR or SERIAL_PORT")
 		}
-		log.Printf("WARN: invalid int for %s: %s, using default %d", key, v, def)
 	}
-	return def
-}
-
-func getenvUint16(key string, def uint16) uint16 {
-	if v, ok := os.LookupEnv(key); ok {
-		if iv, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			if iv < 0 {
-				log.Printf("WARN: negative for %s: %s, using default %d", key, v, def)
-				return def
-			}
-			return uint16(iv)
-		}
-		log.Printf("WARN: invalid uint16 for %s: %s, using default %d", key, v, def)
-	}
-	return def
-}
-
-func getenvUint8(key string, def uint8) uint8 {
-	if v, ok := os.LookupEnv(key); ok {
-		if iv, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			if iv < 0 {
-				log.Printf("WARN: negative for %s: %s, using default %d", key, v, def)
-				return def
-			}
-			return uint8(iv)
-		}
-		log.Printf("WARN: invalid uint8 for %s: %s, using default %d", key, v, def)
-	}
-	return def
-}
-
-func getenvBool(key string, def bool) bool {
-	if v, ok := os.LookupEnv(key); ok {
-		lv := strings.ToLower(strings.TrimSpace(v))
-		return lv == "1" || lv == "true" || lv == "yes" || lv == "y"
-	}
-	return def
-}
-
-func getenvFloat(key string, def float64) float64 {
-	if v, ok := os.LookupEnv(key); ok {
-		if fv, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
-			return fv
-		}
-		log.Printf("WARN: invalid float for %s: %s, using default %f", key, v, def)
-	}
-	return def
-}
-
-func LoadConfig() Config {
-	cfg := Config{
-		HTTPHost:              getenv("HTTP_HOST", "0.0.0.0"),
-		HTTPPort:              getenvInt("HTTP_PORT", 8080),
-		UpdateIntervalMs:      getenvInt("ACQ_INTERVAL_MS", 500),
-		RequestTimeoutMs:      getenvInt("REQUEST_TIMEOUT_MS", 500),
-		RetryInitialBackoffMs: getenvInt("RETRY_INITIAL_BACKOFF_MS", 500),
-		RetryMaxBackoffMs:     getenvInt("RETRY_MAX_BACKOFF_MS", 10000),
-		RetryMultiplier:       getenvFloat("RETRY_MULTIPLIER", 2.0),
-
-		ModbusTCPAddr:         getenv("MODBUS_TCP_ADDR", ""),
-		ModbusTCPUnitID:       getenvUint8("MODBUS_TCP_UNIT_ID", 1),
-
-		ModbusRTUPort:         getenv("MODBUS_RTU_PORT", ""),
-		ModbusRTUBaud:         getenvInt("MODBUS_RTU_BAUD", 9600),
-		ModbusRTUDataBits:     getenvInt("MODBUS_RTU_DATA_BITS", 8),
-		ModbusRTUParity:       strings.ToUpper(getenv("MODBUS_RTU_PARITY", "N")),
-		ModbusRTUStopBits:     getenvInt("MODBUS_RTU_STOP_BITS", 1),
-		ModbusRTUUnitID:       getenvUint8("MODBUS_RTU_UNIT_ID", 1),
-
-		ReadCoilsAddr:         getenvUint16("READ_COILS_ADDR", 0),
-		ReadCoilsCount:        getenvUint16("READ_COILS_COUNT", 0),
-		ReadDiscreteAddr:      getenvUint16("READ_DISCRETE_ADDR", 0),
-		ReadDiscreteCount:     getenvUint16("READ_DISCRETE_COUNT", 0),
-		ReadInputRegAddr:      getenvUint16("READ_INPUT_REG_ADDR", 0),
-		ReadInputRegCount:     getenvUint16("READ_INPUT_REG_COUNT", 0),
-		ReadHoldingRegAddr:    getenvUint16("READ_HOLDING_REG_ADDR", 0),
-		ReadHoldingRegCount:   getenvUint16("READ_HOLDING_REG_COUNT", 0),
-
-		WriteCoilEnable:       getenvBool("WRITE_COIL_ENABLE", false),
-		WriteCoilAddr:         getenvUint16("WRITE_COIL_ADDR", 0),
-		WriteCoilValue:        getenvBool("WRITE_COIL_VALUE", false),
-
-		WriteRegEnable:        getenvBool("WRITE_REG_ENABLE", false),
-		WriteRegAddr:          getenvUint16("WRITE_REG_ADDR", 0),
-		WriteRegValue:         getenvUint16("WRITE_REG_VALUE", 0),
-
-		MQTTBrokerURL:         getenv("MQTT_BROKER_URL", ""),
-		MQTTClientID:          getenv("MQTT_CLIENT_ID", "daq2000-driver"),
-		MQTTUsername:          getenv("MQTT_USERNAME", ""),
-		MQTTPassword:          getenv("MQTT_PASSWORD", ""),
-		MQTTTopic:             getenv("MQTT_TOPIC", ""),
+	if cfg.Protocol != "tcp" && cfg.Protocol != "rtu" {
+		return nil, errors.New("PROTOCOL must be 'tcp' or 'rtu'")
 	}
 
-	if cfg.UpdateIntervalMs <= 0 {
-		cfg.UpdateIntervalMs = 500
+	if cfg.Protocol == "tcp" && cfg.ModbusTCPAddr == "" {
+		return nil, errors.New("MODBUS_TCP_ADDR required for tcp protocol")
 	}
-	if cfg.UpdateIntervalMs > 1000 {
-		log.Printf("INFO: ACQ_INTERVAL_MS capped at 1000ms (was %d)", cfg.UpdateIntervalMs)
-		cfg.UpdateIntervalMs = 1000
+	if cfg.Protocol == "rtu" && cfg.SerialPort == "" {
+		return nil, errors.New("SERIAL_PORT required for rtu protocol")
 	}
-	if cfg.ModbusRTUParity != "N" && cfg.ModbusRTUParity != "E" && cfg.ModbusRTUParity != "O" {
-		log.Printf("WARN: invalid MODBUS_RTU_PARITY '%s', using 'N'", cfg.ModbusRTUParity)
-		cfg.ModbusRTUParity = "N"
+
+	if strings.IndexByte("NEO", cfg.Parity[0]) == -1 {
+		return nil, errors.New("PARITY must be N/E/O")
 	}
-	if cfg.ModbusRTUStopBits != 1 && cfg.ModbusRTUStopBits != 2 {
-		log.Printf("WARN: invalid MODBUS_RTU_STOP_BITS '%d', using 1", cfg.ModbusRTUStopBits)
-		cfg.ModbusRTUStopBits = 1
+	if cfg.StopBits != 1 && cfg.StopBits != 2 {
+		return nil, errors.New("STOP_BITS must be 1 or 2")
 	}
-	return cfg
+
+	return cfg, nil
 }
