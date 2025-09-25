@@ -1,93 +1,62 @@
-IoT Driver for Honeywell DA-01 (Industrial IoT Edge Data Acquisition Module)
+Industrial IoT Edge Data Acquisition Module HTTP Driver (Modbus TCP to HTTP)
 
 Overview
-- Connects to the device via its native protocols (Modbus TCP or Modbus RTU; optional MQTT connectivity)
-- Performs real-time acquisition (≤ 1s interval) from configurable Modbus register ranges
-- Exposes a single HTTP endpoint to present device and communication status
-- Implements robust retries with exponential backoff, structured JSON logging, and graceful shutdown
+- This driver connects to the Industrial IoT Edge Data Acquisition Module using its native Modbus TCP protocol, continuously polls input channels, and exposes a minimal HTTP API for consumption by browsers and CLI tools.
+- It performs protocol conversion (Modbus TCP → HTTP/JSON) and maintains a resilient background collection loop with timeout, retry, and exponential backoff.
 
-Build and Run
-1) Ensure Go (1.21+) is installed.
-
-2) Set required environment variables (examples below), then run:
-- Build: go build -o driver
-- Run: ./driver
+Requirements
+- Node.js 16+ (recommended 18+)
+- Network reachability to the device over Modbus TCP
 
 Environment Variables
-HTTP server
-- HTTP_HOST: HTTP bind host (default: 0.0.0.0)
-- HTTP_PORT: HTTP port (default: 8080)
+- HTTP_HOST: HTTP server bind address (default: 0.0.0.0)
+- HTTP_PORT: HTTP server port (default: 8080)
+- MODBUS_HOST: Device IP or hostname (required)
+- MODBUS_PORT: Modbus TCP port (default: 502)
+- MODBUS_ID: Modbus Unit ID/Slave ID (default: 1)
+- READ_TIMEOUT_MS: Per-request timeout in milliseconds (default: 1000)
+- POLL_INTERVAL_MS: Background polling interval in milliseconds (default: 100)
+- BACKOFF_MIN_MS: Minimum reconnect backoff in milliseconds (default: 500)
+- BACKOFF_MAX_MS: Maximum reconnect backoff in milliseconds (default: 10000)
+- ANALOG_CHANNELS: Number of analog input channels (default: 8)
+- ANALOG_REG_START: Starting register address for analog inputs (default: 0)
+- ANALOG_REG_TYPE: Register type for analog inputs: INPUT (FC4) or HOLDING (FC3). Default: INPUT
+- DIGITAL_INPUT_COUNT: Number of digital input channels (default: 4)
+- DIGITAL_INPUT_START: Starting address for digital inputs (default: 0)
+- ANALOG_SCALE: Optional comma-separated per-channel scale factors for analog inputs (length = ANALOG_CHANNELS). Default: 1 for all
+- ANALOG_OFFSET: Optional comma-separated per-channel offsets for analog inputs (length = ANALOG_CHANNELS). Default: 0 for all
 
-Protocol selection
-- PROTOCOL: tcp or rtu. If not set, auto-detected from MODBUS_TCP_ADDR or SERIAL_PORT
+Install & Run
+1) Install dependencies
+   npm install
 
-Modbus TCP
-- MODBUS_TCP_ADDR: host:port of device (required if PROTOCOL=tcp)
-- TCP_TIMEOUT_MS: Modbus request timeout in ms (default: 1000)
+2) Set environment variables (example)
+   export MODBUS_HOST=192.168.1.50
+   export HTTP_PORT=8080
+   export POLL_INTERVAL_MS=100
 
-Modbus RTU
-- SERIAL_PORT: serial device path, e.g. /dev/ttyUSB0 (required if PROTOCOL=rtu)
-- BAUD_RATE: baud rate (default: 9600)
-- DATA_BITS: data bits (default: 8)
-- PARITY: N/E/O (default: N)
-- STOP_BITS: 1 or 2 (default: 1)
-
-Common Modbus
-- SLAVE_ID: Modbus unit id (default: 1)
-- POLL_INTERVAL_MS: poll interval in ms; capped at ≤1000ms (default: 1000)
-
-Register read configuration (all optional; set count>0 to enable)
-- READ_HOLDING_START (default: 0)
-- READ_HOLDING_COUNT (default: 10)
-- READ_INPUT_START (default: 0)
-- READ_INPUT_COUNT (default: 0)
-- READ_COIL_START (default: 0)
-- READ_COIL_COUNT (default: 0)
-- READ_DISCRETE_START (default: 0)
-- READ_DISCRETE_COUNT (default: 0)
-
-Retry/Backoff
-- RETRY_INITIAL_MS: initial reconnect backoff (default: 500)
-- RETRY_MAX_MS: max reconnect backoff (default: 10000)
-
-Optional MQTT connectivity (for link status/diagnostics)
-- MQTT_BROKER: e.g. tcp://broker:1883
-- MQTT_CLIENT_ID: client id (optional)
-- MQTT_USERNAME: username (optional)
-- MQTT_PASSWORD: password (optional)
-- MQTT_TOPIC: topic to subscribe for diagnostics (optional)
-- MQTT_KEEPALIVE_S: keepalive seconds (default: 30)
+3) Start the driver
+   npm start
 
 HTTP API
+- GET /inputs/analog
+  - Returns the latest analog samples from all channels
+  - Example:
+    curl "http://localhost:8080/inputs/analog"
+
+- GET /inputs/analog?channel_id=N
+  - Returns the latest analog sample for channel N (0-based)
+  - Example:
+    curl "http://localhost:8080/inputs/analog?channel_id=3"
+
 - GET /status
-  Returns JSON with overall device health and communication status, including:
-  - network link state
-  - Modbus RTU/TCP readiness
-  - MQTT connection state
-  - acquisition status
-  - current update interval
-  - last sample timestamp
-  - summary of recent errors and reconnect attempts
-
-Quick Start Examples
-1) Modbus TCP
-- export PROTOCOL=tcp
-- export MODBUS_TCP_ADDR=192.168.1.50:502
-- ./driver
-- curl http://localhost:8080/status
-
-2) Modbus RTU
-- export PROTOCOL=rtu
-- export SERIAL_PORT=/dev/ttyUSB0
-- export BAUD_RATE=19200
-- ./driver
-- curl http://localhost:8080/status
-
-One-liner curl example
-- curl -s http://127.0.0.1:8080/status | jq
+  - Returns module and driver status (reachability, configuration, last update timestamp)
+  - Example:
+    curl "http://localhost:8080/status"
 
 Notes
-- This driver actively polls the device using Modbus and maintains an internal buffer with the latest sample for fast responses.
-- Only the required /status endpoint is exposed. No native protocol URLs are exposed or redirected.
+- This driver polls the device using Modbus TCP and never exposes native protocol URLs.
+- It implements automatic reconnection with exponential backoff and timestamps every update.
+- Values returned for analog inputs are the raw register values optionally scaled/offset via environment variables.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)

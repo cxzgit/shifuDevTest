@@ -1,0 +1,13 @@
+{
+  "name": "industrial-iot-modbus-http-driver",
+  "version": "1.0.0",
+  "description": "HTTP driver that polls an Industrial IoT Edge Data Acquisition Module over Modbus TCP and exposes HTTP endpoints.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "modbus-serial": "^9.3.6"
+  }
+}
