@@ -1,63 +1,81 @@
-Industrial IoT Edge Data Acquisition Module Driver (DAQ-2000) - HTTP Modbus Proxy
+Industrial IoT Edge Data Acquisition Module Driver (DAQ-2000)
 
 Overview
-- This Golang driver connects to a Siemens DAQ-2000 over its native Modbus protocol (TCP or RTU) and exposes a simple HTTP endpoint to read coils, discrete inputs, input registers, or holding registers.
-- It runs a background collection loop with automatic retry/backoff, maintains a thread-safe buffer with the latest sampled data, and logs key events for diagnostics.
-
-Environment Variables
-- HTTP_HOST: HTTP server bind host (e.g., 0.0.0.0)
-- HTTP_PORT: HTTP server port (e.g., 8080)
-- MODBUS_PROTOCOL: Modbus transport to use for background polling: tcp or rtu
-- For TCP (used when MODBUS_PROTOCOL=tcp):
-  - DEVICE_HOST: Modbus TCP device host (e.g., 192.168.1.50)
-  - DEVICE_PORT: Modbus TCP device port (e.g., 502)
-- For RTU (used when MODBUS_PROTOCOL=rtu):
-  - SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0 or COM3)
-  - SERIAL_BAUD: Baud rate (e.g., 9600)
-  - SERIAL_PARITY: Parity (N, E, O or NONE, EVEN, ODD)
-  - SERIAL_STOPBITS: Stop bits (1 or 2)
-  - SERIAL_DATABITS: Data bits (usually 8)
-- Common:
-  - SLAVE_ID: Modbus slave/unit ID (e.g., 1)
-  - TIMEOUT_MS: Modbus operation timeout in milliseconds (e.g., 1000)
-- Background Polling:
-  - POLL_TABLE: coil | discrete | input | holding (which register group to poll)
-  - POLL_ADDRESS: Start address for polling (e.g., 0)
-  - POLL_QUANTITY: Number of points/registers to poll (e.g., 16)
-  - POLL_INTERVAL_MS: Poll interval in milliseconds (e.g., 500)
-- Retry/Backoff:
-  - RETRY_INITIAL_MS: Initial backoff delay in ms (e.g., 500)
-  - RETRY_MAX_MS: Maximum backoff delay in ms (e.g., 5000)
-  - RETRY_MAX_ATTEMPTS: Maximum retry attempts before capping backoff (e.g., 10)
-
-Run
-1) Set the required environment variables for your transport (TCP or RTU) and polling configuration.
-2) Build and run:
-   - go build -o driver
-   - ./driver
+- This Golang driver connects to a DAQ-2000 device via native protocols (Modbus TCP and/or Modbus RTU, optional MQTT), continuously acquires data at a sub-1s interval, and exposes an HTTP endpoint for health/status monitoring.
+- It includes resilient background collection with timeouts, retry, exponential backoff, structured logging, and graceful shutdown.
 
 HTTP API
-- GET /modbus/read
-  - Query parameters (optional; defaults to env configuration):
-    - protocol: tcp | rtu
-    - host: hostname/IP (TCP)
-    - port: TCP port (TCP)
-    - serial_port: serial port path (RTU)
-    - slave_id: Modbus slave ID
-    - table: coil | discrete | input | holding
-    - address: start address
-    - quantity: number of points/registers
-    - timeout_ms: operation timeout in ms
-  - Returns JSON with the requested values and metadata. If the request matches the background polling configuration, the driver returns the cached sample for fast responses; otherwise, it performs a live read.
+- GET /status
+  Returns overall device and communication status (JSON): Modbus TCP state, RS-485/RTU state, MQTT connection, acquisition running state, current update_interval_ms, last_error summary, and recent reconnection attempts.
 
-Example curl
-- TCP holding registers:
-  curl "http://localhost:8080/modbus/read?protocol=tcp&host=192.168.1.50&port=502&slave_id=1&table=holding&address=0&quantity=10&timeout_ms=1000"
-- RTU coils using cached polling config (assuming env matches):
-  curl "http://localhost:8080/modbus/read?protocol=rtu&table=coil"
+Quick Start
+1. Set environment variables (only what you use). Example for Modbus TCP:
+   - HTTP_HOST=0.0.0.0
+   - HTTP_PORT=8080
+   - MODBUS_TCP_ADDR=192.168.1.100:502
+   - MODBUS_TCP_UNIT_ID=1
+   - ACQ_INTERVAL_MS=500
+   - REQUEST_TIMEOUT_MS=500
+   - READ_COILS_ADDR=0
+   - READ_COILS_COUNT=8
+   - READ_INPUT_REG_ADDR=3000
+   - READ_INPUT_REG_COUNT=4
+
+2. Build & run
+   - go mod download
+   - go run .
+
+3. Check status
+   - curl http://localhost:8080/status
+
+Environment Variables
+- HTTP_HOST: HTTP server host (default: 0.0.0.0)
+- HTTP_PORT: HTTP server port (default: 8080)
+- ACQ_INTERVAL_MS: acquisition interval in ms (default: 500, capped at 1000)
+- REQUEST_TIMEOUT_MS: per-request timeout in ms (default: 500)
+- RETRY_INITIAL_BACKOFF_MS: initial backoff delay for reconnect (default: 500)
+- RETRY_MAX_BACKOFF_MS: max backoff delay for reconnect (default: 10000)
+- RETRY_MULTIPLIER: exponential backoff multiplier (default: 2.0)
+
+Modbus TCP (optional)
+- MODBUS_TCP_ADDR: device address host:port (e.g., 192.168.1.100:502)
+- MODBUS_TCP_UNIT_ID: Modbus unit/slave ID (default: 1)
+
+Modbus RTU (optional)
+- MODBUS_RTU_PORT: serial port (e.g., /dev/ttyUSB0)
+- MODBUS_RTU_BAUD: baud rate (default: 9600)
+- MODBUS_RTU_DATA_BITS: data bits (default: 8)
+- MODBUS_RTU_PARITY: parity N/E/O (default: N)
+- MODBUS_RTU_STOP_BITS: stop bits 1/2 (default: 1)
+- MODBUS_RTU_UNIT_ID: Modbus unit/slave ID (default: 1)
+
+Modbus Read Configuration (optional; set counts to >0 to enable reads)
+- READ_COILS_ADDR, READ_COILS_COUNT
+- READ_DISCRETE_ADDR, READ_DISCRETE_COUNT
+- READ_INPUT_REG_ADDR, READ_INPUT_REG_COUNT
+- READ_HOLDING_REG_ADDR, READ_HOLDING_REG_COUNT
+
+Modbus Write on Connect (optional)
+- WRITE_COIL_ENABLE: enable coil write (true/false)
+- WRITE_COIL_ADDR: coil address
+- WRITE_COIL_VALUE: coil value (true=ON, false=OFF)
+- WRITE_REG_ENABLE: enable single register write (true/false)
+- WRITE_REG_ADDR: holding register address
+- WRITE_REG_VALUE: uint16 value
+
+MQTT (optional)
+- MQTT_BROKER_URL: broker URL (e.g., tcp://broker:1883)
+- MQTT_CLIENT_ID: client ID (default: daq2000-driver)
+- MQTT_USERNAME: username (optional)
+- MQTT_PASSWORD: password (optional)
+- MQTT_TOPIC: topic to subscribe (optional)
 
 Notes
-- The driver manages connection retries with exponential backoff, logs connect/disconnect and read errors, and shuts down gracefully on SIGINT/SIGTERM.
-- All configuration values are sourced from environment variables; request query parameters can override them per-call without changing the background polling configuration.
+- The driver actively polls device data via Modbus and logs the latest samples; the HTTP interface provides operational status for monitoring and diagnostics.
+- Configure either Modbus TCP or RTU (or both). MQTT is optional for cloud link status.
+- Graceful shutdown is supported via SIGINT/SIGTERM.
+
+Example
+- curl http://127.0.0.1:8080/status
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
