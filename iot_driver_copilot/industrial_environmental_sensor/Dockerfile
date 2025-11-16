@@ -1,30 +1,22 @@
-# Multi-stage build for a minimal production image
-FROM golang:1.22-alpine AS builder
-
-# Install prerequisites (e.g., git for fetching modules)
-RUN apk add --no-cache git
-
+# Build stage
+FROM golang:1.22-alpine AS build
 WORKDIR /app
 
-# Copy driver source code and dependency file first
+# Copy dependency file and source code
+COPY go.mod ./
 COPY . .
 
-# Prepare and verify module dependencies
+# Install dependencies (use tidy as go.sum is not included)
 RUN go mod tidy
 
-# Build static binary for portability
-ENV CGO_ENABLED=0
-RUN go build -o driver .
+# Build the binary
+RUN CGO_ENABLED=0 GOFLAGS="-buildvcs=false" go build -trimpath -ldflags="-s -w" -o /out/driver ./
 
-# Final runtime image
+# Runtime stage
 FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S app && adduser -S -G app app
 
-# Create non-root user for security
-RUN adduser -D -u 10001 appuser
-WORKDIR /app
-
-# Copy built binary
-COPY --from=builder /app/driver /usr/local/bin/driver
-
-USER appuser
+COPY --from=build /out/driver /usr/local/bin/driver
+USER app
 ENTRYPOINT ["/usr/local/bin/driver"]
