@@ -1,76 +1,68 @@
-Industrial Environmental Sensor Driver (Modbus RTU to HTTP)
+Industrial Environmental Sensor Modbus RTU to HTTP Driver (C++)
 
 Overview
-- This driver connects to a Modbus RTU (RS485) temperature and humidity sensor, continuously collects data with CRC16 verification, and exposes an HTTP endpoint for monitoring connectivity and health.
-- The driver performs protocol conversion by actively ingesting device data (via Modbus RTU) and serving a JSON status over HTTP.
+- This driver connects to a Modbus RTU (RS485) industrial temperature and humidity sensor, continuously collects data with CRC-verified transactions, and exposes an HTTP endpoint for health and connection status.
+- Native Modbus RTU protocol is converted to an HTTP interface. The driver ingests data via the serial port and serves status over HTTP.
 
-HTTP API (only required endpoints implemented)
+Build
+- Requires a C++17 compiler and POSIX environment.
+- Compile:
+  g++ -std=c++17 -pthread driver.cpp -o driver
+
+Run
+- Set environment variables as needed, then run:
+  ./driver
+
+Environment Variables (used by the driver)
+- HTTP_HOST: HTTP server host to bind (default: 0.0.0.0)
+- HTTP_PORT: HTTP server port (default: 8080)
+- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0) (default: /dev/ttyUSB0)
+- BAUD_RATE: Serial baud rate (default: 9600)
+- DATA_BITS: Serial data bits (7 or 8; default: 8)
+- PARITY: Serial parity (N/E/O; default: N)
+- STOP_BITS: Serial stop bits (1 or 2; default: 1)
+- MODBUS_DEVICE_ID: Modbus slave address (default: 1)
+- READ_TIMEOUT_MS: Modbus read timeout per transaction in ms (default: 500)
+- POLL_INTERVAL_MS: Poll interval override in ms; if 0 uses device sample interval from register (default: 0)
+- RETRY_BASE_MS: Base backoff delay in ms for reconnects (default: 500)
+- RETRY_MAX_MS: Max backoff delay in ms for reconnects (default: 5000)
+- MAX_RETRIES: Max reconnect attempts before staying disconnected; 0 for infinite (default: 0)
+- AUTO_RECONNECT: Enable automatic reconnection (true/false) (default: true)
+- TEMP_REG: Holding register address for temperature (default: 0)
+- HUM_REG: Holding register address for humidity (default: 1)
+- SAMPLE_INTERVAL_REG: Holding register address for sample interval in seconds (default: 2)
+- TEMP_SCALE_NUM: Temperature scale numerator (default: 1)
+- TEMP_SCALE_DEN: Temperature scale denominator (default: 100)
+- HUM_SCALE_NUM: Humidity scale numerator (default: 1)
+- HUM_SCALE_DEN: Humidity scale denominator (default: 100)
+
+HTTP API
 - GET /status
-  Returns JSON with: connection_state (connected|disconnected|reconnecting), port, device_id, last_seen timestamp, last_error (type: timeout|crc_mismatch|invalid_response with message), error_counters (timeouts, crc_mismatches, invalid_responses), retries_in_progress, auto_reconnect (enabled|disabled), and current sample_interval_s (read from device registers).
+  Returns JSON with fields:
+  - connection_state: connected|disconnected|reconnecting
+  - port: serial device path
+  - device_id: Modbus slave address
+  - last_seen: ISO8601 timestamp of the last successful sample
+  - last_error: null or { type: timeout|crc_mismatch|invalid_response, message: string }
+  - error_counters: { timeouts: number, crc_mismatches: number, invalid_responses: number }
+  - retries_in_progress: current retry attempt counter
+  - auto_reconnect: enabled|disabled
+  - sample_interval_s: current sampling interval (seconds) read from the device
 
-Example
-- curl command: curl http://127.0.0.1:8080/status
+Quick Test
+- Example:
+  HTTP_HOST=0.0.0.0 HTTP_PORT=8080 SERIAL_PORT=/dev/ttyUSB0 MODBUS_DEVICE_ID=1 \
+  BAUD_RATE=9600 DATA_BITS=8 PARITY=N STOP_BITS=1 READ_TIMEOUT_MS=500 \
+  RETRY_BASE_MS=500 RETRY_MAX_MS=5000 MAX_RETRIES=0 AUTO_RECONNECT=true \
+  TEMP_REG=0 HUM_REG=1 SAMPLE_INTERVAL_REG=2 TEMP_SCALE_NUM=1 TEMP_SCALE_DEN=100 HUM_SCALE_NUM=1 HUM_SCALE_DEN=100 \
+  ./driver
 
-Environment Variables (all required unless noted as optional)
-- HTTP_HOST: HTTP server listen host (e.g., 0.0.0.0 or 127.0.0.1)
-- HTTP_PORT: HTTP server port (e.g., 8080)
-- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0)
-- BAUD_RATE: Serial baud rate (supported: 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
-- DATA_BITS: 7 or 8
-- PARITY: N (none), E (even), O (odd)
-- STOP_BITS: 1 or 2
-- MODBUS_ID: Slave address (1–247)
-- REG_TEMP_ADDR: Holding register address for temperature (start address)
-- REG_TEMP_LEN: Number of registers for temperature (1 or 2)
-- TEMP_SCALE: Scale factor for raw temperature value
-- TEMP_OFFSET: Offset for scaled temperature value
-- REG_HUM_ADDR: Holding register address for humidity (start address)
-- REG_HUM_LEN: Number of registers for humidity (1 or 2)
-- HUM_SCALE: Scale factor for raw humidity value
-- HUM_OFFSET: Offset for scaled humidity value
-- REG_SAMPLE_ADDR: Holding register address for device sampling interval (seconds)
-- REG_SAMPLE_LEN: Number of registers for sampling interval (typically 1)
-- READ_TIMEOUT_MS: Read timeout per transaction (milliseconds)
-- WRITE_TIMEOUT_MS: Write timeout per transaction (milliseconds)
-- POLL_INTERVAL_MS: Background poll interval (milliseconds)
-- RETRY_BASE_MS: Initial backoff delay for reconnection attempts (milliseconds)
-- RETRY_MAX_MS: Maximum backoff delay for reconnection attempts (milliseconds)
-- AUTO_RECONNECT: enabled or disabled; if enabled, the driver will automatically reconnect with exponential backoff
-- SET_SAMPLE_INTERVAL_S (optional): If provided (1–60), the driver will write this value to REG_SAMPLE_ADDR via Modbus function 0x06 on startup.
-
-Build & Run
-1. Build: g++ -std=c++17 driver.cpp -o driver
-2. Run (example):
-   HTTP_HOST=0.0.0.0 \
-   HTTP_PORT=8080 \
-   SERIAL_PORT=/dev/ttyUSB0 \
-   BAUD_RATE=9600 \
-   DATA_BITS=8 \
-   PARITY=N \
-   STOP_BITS=1 \
-   MODBUS_ID=1 \
-   REG_TEMP_ADDR=0 \
-   REG_TEMP_LEN=1 \
-   TEMP_SCALE=0.1 \
-   TEMP_OFFSET=0 \
-   REG_HUM_ADDR=1 \
-   REG_HUM_LEN=1 \
-   HUM_SCALE=0.1 \
-   HUM_OFFSET=0 \
-   REG_SAMPLE_ADDR=10 \
-   REG_SAMPLE_LEN=1 \
-   READ_TIMEOUT_MS=500 \
-   WRITE_TIMEOUT_MS=500 \
-   POLL_INTERVAL_MS=1000 \
-   RETRY_BASE_MS=500 \
-   RETRY_MAX_MS=8000 \
-   AUTO_RECONNECT=enabled \
-   ./driver
+- Query status:
+  curl http://localhost:8080/status
 
 Notes
-- The driver validates Modbus CRC16 on both requests and responses.
-- Background collection includes timeouts, CRC mismatch, and invalid response handling; the driver maintains counters and last_error details.
-- Automatic reconnection uses exponential backoff within the configured base and maximum limits.
-- The driver runs on POSIX systems (Linux) using termios for serial and a built-in minimal HTTP server using sockets.
+- The driver implements CRC16 for Modbus RTU and validates all responses.
+- Background collection handles timeouts, CRC mismatches, invalid responses, and performs exponential backoff on reconnect.
+- Graceful shutdown is supported via SIGINT/SIGTERM.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
