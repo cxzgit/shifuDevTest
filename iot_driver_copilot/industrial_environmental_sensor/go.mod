@@ -1,3 +1,3 @@
-module example.com/iot-driver
+module iotdriver
 
 go 1.22

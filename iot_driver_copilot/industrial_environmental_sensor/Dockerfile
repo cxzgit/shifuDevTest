@@ -1,23 +1,26 @@
-# Multi-stage build for Go driver
+# Multi-stage build for Go IoT driver
 FROM golang:1.22-alpine AS builder
 
-# Create working directory and copy source + dependency manifest first
 WORKDIR /app
+
+# Copy dependency manifest and source code before installing dependencies
+COPY go.mod .
 COPY . .
 
-# Tidy modules (since go.sum isn't provided)
+# Tidy and fetch dependencies (even if none, ensures module files are consistent)
 RUN go mod tidy
 
-# Build statically for minimal runtime image
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/driver .
+# Build static binary for minimal runtime image
+RUN CGO_ENABLED=0 go build -o driver -trimpath -ldflags "-s -w" .
 
-# Runtime stage
+# Final minimal runtime image
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates && \
-    addgroup -S app && adduser -S app -G app
 
-WORKDIR /app
-COPY --from=builder /app/driver /app/driver
+# Create non-root user
+RUN adduser -D -u 10001 appuser
 
-USER app
-ENTRYPOINT ["/app/driver"]
+# Copy the built binary
+COPY --from=builder /app/driver /usr/local/bin/driver
+
+USER appuser
+ENTRYPOINT ["/usr/local/bin/driver"]
