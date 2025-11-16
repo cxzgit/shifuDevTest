@@ -1,3 +1,3 @@
-module iotdriver
+module driver
 
 go 1.22
