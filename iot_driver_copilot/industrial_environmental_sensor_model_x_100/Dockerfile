@@ -1,21 +1,25 @@
-# Builder stage
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
-# Copy dependency file and source code
-COPY go.mod .
-COPY *.go ./
+# Install prerequisites for fetching modules
+RUN apk add --no-cache git ca-certificates
 
-# Install modules
+# Copy source code and dependency file first
+COPY . .
+
+# Resolve and tidy Go module dependencies
 RUN go mod tidy
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o driver .
+# Build static binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /app/driver ./
 
-# Runtime stage
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
+# Runtime image
+FROM alpine:3.20
 WORKDIR /app
-COPY --from=builder /app/driver /app/driver
+
+RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
+
+COPY --from=builder /app/driver /usr/local/bin/driver
+
 USER appuser
-ENTRYPOINT ["./driver"]
+ENTRYPOINT ["/usr/local/bin/driver"]
