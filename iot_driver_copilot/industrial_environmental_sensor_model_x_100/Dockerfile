@@ -3,25 +3,31 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Copy source code and dependency file first
+# Copy driver code and dependency file first
 COPY . .
 
-# Tidy modules since go.sum is not included
+# Install prerequisites for fetching Go modules
+RUN apk add --no-cache git
+
+# Tidy modules (no go.sum included)
 RUN go mod tidy
 
-# Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/driver .
+# Build a static binary
+RUN CGO_ENABLED=0 go build -o /bin/driver .
 
 # Runtime stage
 FROM alpine:3.20
 
-# Install runtime prerequisites
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
+# Install certificates for networking
+RUN apk add --no-cache ca-certificates
 
-WORKDIR /home/appuser
+# Create non-root user
+RUN addgroup -S app && adduser -S -G app app
 
-COPY --from=builder /app/driver /usr/local/bin/driver
+# Copy built binary
+COPY --from=builder /bin/driver /usr/local/bin/driver
+RUN chmod +x /usr/local/bin/driver && chown app:app /usr/local/bin/driver
 
-USER appuser
+USER app
 
-CMD ["/usr/local/bin/driver"]
+ENTRYPOINT ["/usr/local/bin/driver"]
