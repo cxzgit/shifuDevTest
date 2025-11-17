@@ -1,18 +1,13 @@
 FROM golang:1.22-alpine AS builder
+RUN apk add --no-cache ca-certificates git
 WORKDIR /app
-
-# Copy dependency file first and tidy modules
-COPY go.mod ./
-RUN go mod tidy
-
-# Copy source code and build
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o driver
+ENV CGO_ENABLED=0
+RUN go mod tidy
+RUN go build -trimpath -ldflags="-s -w" -o /usr/local/bin/driver ./main.go
 
-# Final minimal runtime image
-FROM alpine:3.19
-WORKDIR /app
-RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S app -G app
-COPY --from=builder /app/driver /app/driver
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S -G app app
+COPY --from=builder /usr/local/bin/driver /usr/local/bin/driver
 USER app
-CMD ["./driver"]
+ENTRYPOINT ["/usr/local/bin/driver"]
