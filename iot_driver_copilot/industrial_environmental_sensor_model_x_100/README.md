@@ -1,72 +1,64 @@
-Industrial Environmental Sensor Model X100 HTTP Driver (Modbus RTU over RS-485)
+Industrial Environmental Sensor Model X100 HTTP Driver (Modbus RTU to HTTP)
 
 Overview
-- This driver connects to an Industrial Environmental Sensor Model X100 via Modbus RTU over RS-485 and exposes an HTTP endpoint to retrieve the latest readings as JSON.
-- The driver polls the sensor every 5 seconds by default, validates Modbus CRCs, retries up to 3 times on communication failures, and maintains a thread-safe buffer with the latest successful sample.
-- Protocol conversion: Modbus RTU (native) -> HTTP/JSON.
-
-Build
-- Requires a POSIX-like system (Linux) with a C++17 compiler.
-- Build with:
-  - g++ -std=c++17 -O2 -pthread driver.cpp -o driver
-  - Or: make (if you prefer using your own build tooling)
-
-Run
-- Ensure your RS-485 adapter is available (e.g., /dev/ttyUSB0) and wiring/termination are correct.
-- Set environment variables (see below), then run:
-  - ./driver
-
-Environment Variables
-- HTTP_HOST: IP address to bind HTTP server (e.g., 0.0.0.0)
-- HTTP_PORT: Port for HTTP server (e.g., 8080)
-- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0)
-- SERIAL_BAUD: Baud rate (e.g., 9600)
-- SERIAL_DATA_BITS: Data bits (5, 6, 7, or 8; typical 8)
-- SERIAL_PARITY: Parity (N, E, or O; typical N)
-- SERIAL_STOP_BITS: Stop bits (1 or 2; typical 1)
-- MODBUS_SLAVE_ID: Modbus device address (1–247; default sensor is 1)
-- POLL_INTERVAL_MS: Poll interval in milliseconds (use 5000 per requirements)
-- READ_TIMEOUT_MS: Serial read timeout per operation in milliseconds (e.g., 500)
-- RETRY_LIMIT: Max attempts per poll cycle (will be clamped to 3 to satisfy requirements)
-- BACKOFF_BASE_MS: Initial backoff when device disconnects (e.g., 200)
-- BACKOFF_MAX_MS: Maximum backoff cap (e.g., 3000)
-
-How it works
-- The driver opens the serial port using the configured parameters and communicates via Modbus RTU.
-- Each poll reads 6 input registers starting at 0x0001 using function 0x04, covering:
-  - Temperature: 0x0001 (2 registers)
-  - Humidity: 0x0003 (2 registers)
-  - PM2.5: 0x0005 (2 registers)
-- Data decoding assumes IEEE-754 32-bit float, big-endian register order (high word at lower address). Values are returned in engineering units:
-  - temperature_c (°C), humidity_rh (%RH), pm25_ugm3 (μg/m³)
+- This driver connects to the X100 over Modbus RTU (RS-485) and polls temperature, humidity, and PM2.5 every configured interval.
+- It exposes a single HTTP endpoint to retrieve the latest readings as JSON.
+- The driver validates Modbus CRC and retries communication failures up to the configured limit.
+- Background polling includes timeout handling, retries, exponential backoff on failures, and logs key events.
 
 HTTP API
 - GET /readings
-  - Returns the latest polled environmental measurements as JSON. The driver polls the Modbus RTU sensor every 5 seconds (configurable via POLL_INTERVAL_MS), validates CRC, and retries up to 3 times on communication failure before updating.
-  - On success, example response:
-    {
-      "temperature_c": 23.125,
-      "humidity_rh": 45.300,
-      "pm25_ugm3": 12.500,
-      "timestamp": "2025-01-01T00:00:00Z"
-    }
-  - If no data is available yet, returns HTTP 503 with JSON error.
+  - Returns JSON with the most recent successful poll:
+    - timestamp: ISO8601 UTC
+    - temperature_c: Celsius
+    - humidity_rh: Percent RH
+    - pm25_ugm3: micrograms per cubic meter
+    - status: "ok" on success
 
-One-line test with curl
-- curl http://127.0.0.1:$HTTP_PORT/readings
+Environment Variables (required)
+- HTTP_HOST: IPv4 address to bind (e.g., 0.0.0.0)
+- HTTP_PORT: Port to listen on (e.g., 8080)
+- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0)
+- MODBUS_ADDR: Sensor Modbus address (1..247), default device is 1
+- BAUD_RATE: 1200,2400,4800,9600,19200,38400,57600,115200 (use 9600 for X100 default)
+- DATA_BITS: 7 or 8 (X100 default is 8)
+- PARITY: N, E, or O (X100 default is N)
+- STOP_BITS: 1 or 2 (X100 default is 1)
+- POLL_INTERVAL_SEC: Poll interval in seconds (set 5 to meet device spec)
+- REQUEST_TIMEOUT_MS: Serial request timeout in milliseconds (e.g., 500)
+- RETRY_LIMIT: Max retries per poll cycle on failure (set 3 to meet device spec)
+- BACKOFF_INITIAL_MS: Initial backoff on failure (e.g., 500)
+- BACKOFF_MAX_MS: Maximum backoff on repeated failures (e.g., 5000)
 
-Notes and assumptions
-- Serial default settings of the device are 9600 8N1 and Modbus address 1, but this driver relies on environment variables; set them explicitly for your deployment.
-- If your device uses a different floating-point word order, adjust the driver accordingly (this implementation uses big-endian register order without word swap).
-- The driver implements exponential backoff when the device is disconnected or repeatedly fails to respond, while keeping a buffer with the latest sample for fast HTTP responses.
+Build
+- Requires g++ and POSIX environment.
+- Run: make
 
-Safety & Resilience
-- Background polling loop with per-operation timeout, retry, and exponential backoff.
-- Thread-safe in-memory buffer for latest sample.
-- Graceful shutdown on SIGINT/SIGTERM.
-- Logs key events: connect/disconnect, retries, errors, and updates.
+Run
+- Example:
+  HTTP_HOST=0.0.0.0 \
+  HTTP_PORT=8080 \
+  SERIAL_PORT=/dev/ttyUSB0 \
+  MODBUS_ADDR=1 \
+  BAUD_RATE=9600 \
+  DATA_BITS=8 \
+  PARITY=N \
+  STOP_BITS=1 \
+  POLL_INTERVAL_SEC=5 \
+  REQUEST_TIMEOUT_MS=500 \
+  RETRY_LIMIT=3 \
+  BACKOFF_INITIAL_MS=500 \
+  BACKOFF_MAX_MS=5000 \
+  ./driver
 
-License
-- Provided as-is for integration and evaluation.
+Test with curl
+- curl http://localhost:8080/readings
+
+Notes
+- The driver assumes the sensor exposes 32-bit IEEE-754 floats across two input registers each, big-endian register order:
+  - Temperature: 0x0001 (2 registers)
+  - Humidity:    0x0003 (2 registers)
+  - PM2.5:       0x0005 (2 registers)
+- If your device uses a different encoding (e.g., scaled integers), adapt the decode in driver.cpp accordingly.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
