@@ -1,3 +1,3 @@
-module driver
+module example.com/driver
 
 go 1.22
