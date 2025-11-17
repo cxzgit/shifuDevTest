@@ -1,31 +1,21 @@
 # Builder stage
 FROM golang:1.22-alpine AS builder
-
-# Install prerequisites for fetching modules
-RUN apk add --no-cache git
-
-# Set working directory and copy source
 WORKDIR /app
-COPY . .
 
-# Prepare and vendor dependencies
+# Copy dependency file and source code
+COPY go.mod .
+COPY *.go ./
+
+# Install modules
 RUN go mod tidy
 
-# Build static binary for Linux
-ARG TARGETOS
-ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -o /bin/driver -trimpath -ldflags "-s -w" ./
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o driver .
 
-# Final runtime stage
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates \
- && addgroup -S app && adduser -S -G app app
-
-# Copy built binary
-COPY --from=builder /bin/driver /usr/local/bin/driver
-
-USER app
-WORKDIR /home/app
-
-ENTRYPOINT ["/usr/local/bin/driver"]
+# Runtime stage
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates && adduser -D -u 10001 appuser
+WORKDIR /app
+COPY --from=builder /app/driver /app/driver
+USER appuser
+ENTRYPOINT ["./driver"]
