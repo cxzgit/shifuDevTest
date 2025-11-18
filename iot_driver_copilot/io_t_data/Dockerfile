@@ -1,21 +1,23 @@
-# Multi-stage build for Go driver
-FROM golang:1.22-alpine AS builder
+# syntax=docker/dockerfile:1
 
+# Build stage
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
-# Copy source code and dependency file
+# Copy driver code and dependency file first
 COPY . .
 
-# Install dependencies
+# Install Go module dependencies
 RUN go mod tidy
 
-# Build a statically linked binary
-ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /usr/local/bin/driver .
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o driver .
 
-# Runtime image
+# Runtime stage
 FROM alpine:3.20
-
-COPY --from=builder /usr/local/bin/driver /usr/local/bin/driver
-
+RUN apk --no-cache add ca-certificates && \
+    adduser -D -u 10001 appuser
+WORKDIR /app
+COPY --from=builder /app/driver /usr/local/bin/driver
+USER appuser
 ENTRYPOINT ["/usr/local/bin/driver"]
