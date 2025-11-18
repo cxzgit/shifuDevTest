@@ -1,0 +1,11 @@
+{
+  "name": "iot-data-driver",
+  "version": "1.0.0",
+  "description": "IoT module driver converting native device data to HTTP /status endpoint",
+  "main": "driver.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node driver.js"
+  },
+  "license": "MIT"
+}
