@@ -1,3 +1,3 @@
-module example.com/iot-driver
+module driver
 
-go 1.22
+go 1.23
