@@ -1,16 +1,14 @@
-CXX ?= g++
-CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -pedantic -pthread
-LDFLAGS ?= -pthread
+CXX := g++
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -pthread
+LDFLAGS := -pthread
 
-SRC := $(wildcard *.cpp)
-TARGET := driver
+SRC := driver.cpp
+BIN := driver
 
-all: $(TARGET)
+all: $(BIN)
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
+$(BIN): $(SRC)
+	$(CXX) $(CXXFLAGS) -o $(BIN) $(SRC) $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
-
-.PHONY: all clean
+	rm -f $(BIN)

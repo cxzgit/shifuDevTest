@@ -1,22 +1,28 @@
-# Build stage
-FROM alpine:3.19 AS build
+# Builder stage
+FROM alpine:3.20 AS builder
 WORKDIR /app
-# Copy source code and dependency file first
-COPY . /app
+
+# Copy source and build manifest first
+COPY driver.cpp Makefile ./
+
 # Install build prerequisites
-RUN apk add --no-cache build-base cmake
-# Build using CMake
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build build -j
+RUN apk add --no-cache build-base
+
+# Build the driver
+RUN make
 
 # Runtime stage
-FROM alpine:3.19
-# Install required runtime libraries
-RUN apk add --no-cache libstdc++ libgcc
+FROM alpine:3.20
 WORKDIR /app
+
+# Install runtime C++ standard library
+RUN apk add --no-cache libstdc++
+
 # Copy compiled binary
-COPY --from=build /app/build/driver /usr/local/bin/driver
-# Expose default HTTP port (configurable via env)
-EXPOSE 8000
+COPY --from=builder /app/driver /usr/local/bin/driver
+
+# Default HTTP port (can be overridden with HTTP_PORT env)
+EXPOSE 8080
+
 # Run the driver
-ENTRYPOINT ["/usr/local/bin/driver"]
+CMD ["/usr/local/bin/driver"]
