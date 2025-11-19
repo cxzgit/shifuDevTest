@@ -8,7 +8,7 @@ metadata:
     workspace.name: "test1"
 data:
   driverProperties: |
-    driverSku: HTTP U Camera Device
+    driverSku: HTTP USB Camera Device
     driverImage: edgenesis/usb-camera:v0.0.1
   instructions: |
     instructions:
