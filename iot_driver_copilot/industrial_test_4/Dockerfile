@@ -1,19 +1,19 @@
-FROM python:3.11-alpine
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Copy driver code and dependency manifest
-COPY requirements.txt config.py driver.py README.md ./
+# Copy driver code and dependency file first
+COPY requirements.txt ./
+COPY . ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Default exposed port (HTTP_PORT should be provided via env at runtime)
-EXPOSE 8000
+# Default HTTP port (can be overridden via env HTTP_PORT)
+EXPOSE 8080
 
-# Run with Gunicorn in production; binds using env HTTP_HOST and HTTP_PORT
-CMD ["sh", "-c", "gunicorn --workers 1 --threads 4 --timeout 60 --bind ${HTTP_HOST}:${HTTP_PORT} driver:app"]
+# Run the driver
+CMD ["python", "driver.py"]
