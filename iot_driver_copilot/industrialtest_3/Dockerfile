@@ -1,22 +1,18 @@
-# Multi-stage build for Go Modbus RTU → HTTP driver
-FROM golang:1.20-alpine AS builder
+# Multi-stage build for Go Modbus RTU driver
 
+FROM golang:1.20-alpine AS builder
 WORKDIR /app
 
-# Copy dependency manifest and source code first
-COPY go.mod ./
-COPY *.go ./
+# Copy dependency file and source code before installing dependencies
+COPY go.mod .
+COPY *.go .
 
-# Install tools required to fetch Go modules
-RUN apk add --no-cache git
-
-# Resolve and tidy dependencies
+# Fetch dependencies (no go.sum provided, so use tidy)
 RUN go mod tidy
 
-# Build static binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/driver -trimpath -ldflags "-s -w" .
+# Build a static binary for minimal runtime footprint
+RUN CGO_ENABLED=0 go build -o driver -trimpath -ldflags="-s -w" .
 
-# Runtime image
 FROM alpine:3.19
 WORKDIR /app
 
