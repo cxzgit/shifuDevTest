@@ -1,49 +1,74 @@
 Industrial Environmental Sensor Modbus RTU to HTTP Driver (C++)
 
 Overview
-- Connects to a Modbus RTU environmental sensor over RS-485 (9600 baud, 8N1) and polls holding registers via function code 0x03.
-- Exposes an HTTP interface with two endpoints to fetch driver status and latest sensor readings.
-- Implements protocol conversion and a background polling loop with timeouts, retries, and exponential backoff.
+- This driver connects to a Modbus RTU environmental sensor over RS-485, periodically polls holding registers (function 0x03) for temperature, humidity, and CO₂, and exposes them via a simple HTTP server.
+- Resilient background poller with timeout and exponential backoff.
+- Thread-safe latest readings buffer for fast HTTP responses.
+
+HTTP Endpoints
+- GET /status
+  Returns JSON with: serial_connected, port, slave_id, polling_active, poll_interval_ms, last_poll_time
+- GET /readings
+  Returns JSON with: temperature, humidity, co2, temperature_time, humidity_time, co2_time, last_poll_time
+
+Environment Variables (required)
+- HTTP_HOST: IP to bind HTTP server (e.g., 0.0.0.0)
+- HTTP_PORT: Port for HTTP server (e.g., 8000)
+- SERIAL_PORT: Serial device path (e.g., /dev/ttyUSB0)
+- SERIAL_BAUD: Baud rate (e.g., 9600)
+- SERIAL_PARITY: Parity (N/E/O), e.g., N
+- SERIAL_DATA_BITS: Data bits (7 or 8), e.g., 8
+- SERIAL_STOP_BITS: Stop bits (1 or 2), e.g., 1
+- MODBUS_SLAVE_ID: Modbus RTU slave ID (1..247), e.g., 1
+- REG_TEMP: Holding register address for temperature (e.g., 0)
+- REG_HUMID: Holding register address for humidity (e.g., 1)
+- REG_CO2: Holding register address for CO₂ (e.g., 2)
+- TEMP_SCALE: Scale factor applied to raw temperature register (e.g., 0.1)
+- HUMID_SCALE: Scale factor applied to raw humidity register (e.g., 0.1)
+- CO2_SCALE: Scale factor applied to raw CO₂ register (e.g., 1.0)
+- POLL_INTERVAL_MS: Poll interval in milliseconds (e.g., 1000)
+- READ_TIMEOUT_MS: Modbus read timeout in milliseconds (e.g., 500)
+- BACKOFF_INITIAL_MS: Initial backoff delay when connection fails (e.g., 500)
+- BACKOFF_MAX_MS: Max backoff delay (e.g., 5000)
 
 Build
-- Requires a C++17-capable toolchain on Linux (for POSIX serial and sockets).
-- Build command:
-  g++ -std=c++17 driver.cpp -o driver
+- Requires g++ and a POSIX system (Linux) with RS-485 adapter.
+- Compile:
+  g++ -std=c++17 -O2 driver.cpp -o driver
 
-Run
-- Configure via environment variables (no hard-coded values). Then start the driver:
-  HTTP_HOST=0.0.0.0 HTTP_PORT=8080 SERIAL_PORT=/dev/ttyUSB0 SERIAL_BAUD=9600 MODBUS_SLAVE_ID=1 REG_TEMP_ADDR=0 REG_HUM_ADDR=1 REG_CO2_ADDR=2 POLL_INTERVAL_MS=1000 READ_TIMEOUT_MS=500 BACKOFF_INITIAL_MS=500 BACKOFF_MAX_MS=10000 TEMP_SCALE=1 HUM_SCALE=1 CO2_SCALE=1 ./driver
+Run Example
+- Set environment variables and run:
+  export HTTP_HOST=0.0.0.0
+  export HTTP_PORT=8000
+  export SERIAL_PORT=/dev/ttyUSB0
+  export SERIAL_BAUD=9600
+  export SERIAL_PARITY=N
+  export SERIAL_DATA_BITS=8
+  export SERIAL_STOP_BITS=1
+  export MODBUS_SLAVE_ID=1
+  export REG_TEMP=0
+  export REG_HUMID=1
+  export REG_CO2=2
+  export TEMP_SCALE=0.1
+  export HUMID_SCALE=0.1
+  export CO2_SCALE=1.0
+  export POLL_INTERVAL_MS=1000
+  export READ_TIMEOUT_MS=500
+  export BACKOFF_INITIAL_MS=500
+  export BACKOFF_MAX_MS=5000
+  ./driver
 
-Environment Variables
-- HTTP_HOST: IP/host to bind the HTTP server (e.g., 0.0.0.0)
-- HTTP_PORT: Port for the HTTP server (e.g., 8080)
-- SERIAL_PORT: Serial device path for RS-485 (e.g., /dev/ttyUSB0)
-- SERIAL_BAUD: Baud rate (default 9600)
-- MODBUS_SLAVE_ID: Modbus slave/unit ID of the sensor (default 1)
-- REG_TEMP_ADDR: Holding register address for temperature (default 0)
-- REG_HUM_ADDR: Holding register address for humidity (default 1)
-- REG_CO2_ADDR: Holding register address for CO2 (default 2)
-- TEMP_SCALE: Scale factor applied to raw temp register (default 1.0)
-- HUM_SCALE: Scale factor applied to raw humidity register (default 1.0)
-- CO2_SCALE: Scale factor applied to raw CO2 register (default 1.0)
-- POLL_INTERVAL_MS: Polling interval in milliseconds (default 1000)
-- READ_TIMEOUT_MS: Serial read timeout in milliseconds (default 500)
-- BACKOFF_INITIAL_MS: Initial retry backoff in milliseconds (default 500)
-- BACKOFF_MAX_MS: Maximum retry backoff in milliseconds (default 10000)
+Use the API
+- Status:
+  curl http://localhost:8000/status
+- Readings:
+  curl http://localhost:8000/readings
 
-HTTP API
-- GET /status
-  Returns JSON with connection and polling status: serial_connected, serial_port, slave_id, baud, polling_active, poll_interval_ms, last_poll_time.
-  Example:
-    curl -s http://localhost:8080/status
-
-- GET /readings
-  Returns JSON with latest sensor readings (temperature, humidity, co2) and timestamps per value, plus last_poll_time.
-  Example:
-    curl -s http://localhost:8080/readings
+Graceful Shutdown
+- Press Ctrl+C or send SIGTERM. The driver will stop polling and shut down the HTTP server cleanly.
 
 Notes
-- The driver polls one register for each data point. If your device uses different addresses, set the REG_*_ADDR variables accordingly. If scaling is required (e.g., raw value needs conversion), set TEMP_SCALE, HUM_SCALE, and CO2_SCALE.
-- Implements exponential backoff when the device or serial port is not available. The buffer is thread-safe and serves the most recent values.
+- This driver implements Modbus RTU function 0x03 for reading holding registers.
+- Scaling factors allow converting raw register values to engineering units. Adjust based on your device documentation.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
