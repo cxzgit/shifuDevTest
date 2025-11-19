@@ -1,106 +1,88 @@
 #include <iostream>
 #include <string>
-#include <vector>
 #include <thread>
-#include <mutex>
 #include <atomic>
+#include <mutex>
+#include <vector>
 #include <chrono>
+#include <ctime>
 #include <csignal>
-#include <cstdlib>
 #include <cstdint>
-#include <cstring>
-#include <cctype>
-#include <sstream>
-#include <iomanip>
+#include <cstdlib>
 #include <cerrno>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <cstring>
+#include <sstream>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <sys/select.h>
+#include <termios.h>
 
-// Simple logging
-static std::mutex g_log_mtx;
-static void log_line(const std::string &msg) {
+// ===================== Utility & Config =====================
+
+static std::atomic<bool> g_stop(false);
+
+std::string iso8601_now() {
     using namespace std::chrono;
     auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-    std::tm tm;
-    localtime_r(&t, &tm);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "." << std::setw(3) << std::setfill('0') << ms.count() << " ";
-    std::lock_guard<std::mutex> lk(g_log_mtx);
-    std::cerr << oss.str() << msg << std::endl;
-}
-
-static std::atomic<bool> g_running(true);
-
-static void on_signal(int) {
-    g_running.store(false);
-}
-
-static std::string iso8601_now() {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    std::tm tm;
-    gmtime_r(&t, &tm);
+    std::time_t tt = system_clock::to_time_t(now);
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
     char buf[64];
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return std::string(buf);
 }
 
-static std::string to_iso8601(const std::chrono::system_clock::time_point &tp) {
+std::string format_time_point(const std::chrono::system_clock::time_point &tp) {
+    if (tp.time_since_epoch().count() == 0) return "null";
     using namespace std::chrono;
-    auto t = system_clock::to_time_t(tp);
-    std::tm tm;
-    gmtime_r(&t, &tm);
+    std::time_t tt = system_clock::to_time_t(tp);
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
     char buf[64];
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return std::string(buf);
 }
 
-// Environment helpers
-static std::string getEnvString(const char* name) {
-    const char* v = std::getenv(name);
-    if (!v || std::string(v).empty()) {
-        std::ostringstream oss; oss << "Missing environment variable: " << name;
-        log_line(oss.str());
+void log_event(const std::string &level, const std::string &msg) {
+    std::cerr << iso8601_now() << " [" << level << "] " << msg << std::endl;
+}
+
+std::string getenv_str(const char *name) {
+    const char *v = std::getenv(name);
+    if (!v) {
+        std::cerr << "Missing required environment variable: " << name << std::endl;
         std::exit(1);
     }
     return std::string(v);
 }
 
-static long getEnvLong(const char* name) {
-    std::string s = getEnvString(name);
-    char* end = nullptr;
-    errno = 0;
-    long val = std::strtol(s.c_str(), &end, 10);
-    if (errno != 0 || !end || *end != '\0') {
-        std::ostringstream oss; oss << "Invalid integer for " << name << ": " << s;
-        log_line(oss.str());
+int getenv_int(const char *name) {
+    std::string s = getenv_str(name);
+    try {
+        size_t idx = 0;
+        int val = std::stoi(s, &idx, 10);
+        if (idx != s.size()) throw std::invalid_argument("extra chars");
+        return val;
+    } catch (...) {
+        std::cerr << "Invalid integer for env var " << name << ": " << s << std::endl;
         std::exit(1);
     }
-    return val;
 }
 
-static double getEnvDouble(const char* name) {
-    std::string s = getEnvString(name);
-    char* end = nullptr;
-    errno = 0;
-    double val = std::strtod(s.c_str(), &end);
-    if (errno != 0 || !end || *end != '\0') {
-        std::ostringstream oss; oss << "Invalid float for " << name << ": " << s;
-        log_line(oss.str());
+double getenv_double(const char *name) {
+    std::string s = getenv_str(name);
+    try {
+        size_t idx = 0;
+        double val = std::stod(s, &idx);
+        if (idx != s.size()) throw std::invalid_argument("extra chars");
+        return val;
+    } catch (...) {
+        std::cerr << "Invalid double for env var " << name << ": " << s << std::endl;
         std::exit(1);
     }
-    return val;
 }
 
 struct Config {
@@ -109,82 +91,84 @@ struct Config {
 
     std::string serial_port;
     int serial_baud;
-    int serial_data_bits;
-    char serial_parity; // 'N','E','O'
-    int serial_stop_bits; // 1 or 2
+    int serial_databits;
+    int serial_stopbits;
+    char serial_parity; // 'N', 'E', 'O'
 
-    int modbus_slave_id;
+    int slave_id;
 
-    int reg_temp_addr;
-    int reg_hum_addr;
-    int reg_co2_addr;
+    uint16_t temp_addr;
+    int temp_qty;
+    double temp_scale;
 
-    double scale_temp;
-    double scale_hum;
-    double scale_co2;
+    uint16_t hum_addr;
+    int hum_qty;
+    double hum_scale;
+
+    uint16_t co2_addr;
+    int co2_qty;
+    double co2_scale;
 
     int poll_interval_ms;
-    int serial_read_timeout_ms;
+    int read_timeout_ms;
 
-    int initial_backoff_ms;
-    int max_backoff_ms;
-    double backoff_factor;
+    int retry_init_ms;
+    int retry_max_ms;
+    double retry_multiplier;
 };
 
-static Config load_config() {
+Config load_config() {
     Config c;
-    c.http_host = getEnvString("HTTP_HOST");
-    c.http_port = (int)getEnvLong("HTTP_PORT");
+    c.http_host = getenv_str("HTTP_HOST");
+    c.http_port = getenv_int("HTTP_PORT");
 
-    c.serial_port = getEnvString("SERIAL_PORT");
-    c.serial_baud = (int)getEnvLong("SERIAL_BAUD");
-    c.serial_data_bits = (int)getEnvLong("SERIAL_DATA_BITS");
-    std::string parity = getEnvString("SERIAL_PARITY");
-    if (parity.size() != 1 || (parity[0] != 'N' && parity[0] != 'E' && parity[0] != 'O')) {
-        log_line("SERIAL_PARITY must be one of N/E/O");
-        std::exit(1);
-    }
-    c.serial_parity = parity[0];
-    c.serial_stop_bits = (int)getEnvLong("SERIAL_STOP_BITS");
-    if (!(c.serial_stop_bits == 1 || c.serial_stop_bits == 2)) {
-        log_line("SERIAL_STOP_BITS must be 1 or 2");
-        std::exit(1);
+    c.serial_port = getenv_str("SERIAL_PORT");
+    c.serial_baud = getenv_int("SERIAL_BAUD");
+    c.serial_databits = getenv_int("SERIAL_DATABITS");
+    c.serial_stopbits = getenv_int("SERIAL_STOPBITS");
+    {
+        std::string p = getenv_str("SERIAL_PARITY");
+        if (p.empty()) { std::cerr << "SERIAL_PARITY must be N/E/O" << std::endl; std::exit(1); }
+        char ch = std::toupper(p[0]);
+        if (ch!='N' && ch!='E' && ch!='O') { std::cerr << "SERIAL_PARITY must be N/E/O" << std::endl; std::exit(1); }
+        c.serial_parity = ch;
     }
 
-    c.modbus_slave_id = (int)getEnvLong("MODBUS_SLAVE_ID");
-    if (c.modbus_slave_id < 1 || c.modbus_slave_id > 247) {
-        log_line("MODBUS_SLAVE_ID must be in 1..247");
-        std::exit(1);
-    }
+    c.slave_id = getenv_int("MODBUS_SLAVE_ID");
 
-    c.reg_temp_addr = (int)getEnvLong("REG_TEMP_ADDR");
-    c.reg_hum_addr = (int)getEnvLong("REG_HUM_ADDR");
-    c.reg_co2_addr = (int)getEnvLong("REG_CO2_ADDR");
+    c.temp_addr = static_cast<uint16_t>(getenv_int("TEMP_ADDR"));
+    c.temp_qty = getenv_int("TEMP_QTY");
+    c.temp_scale = getenv_double("TEMP_SCALE");
 
-    c.scale_temp = getEnvDouble("SCALE_TEMP");
-    c.scale_hum = getEnvDouble("SCALE_HUM");
-    c.scale_co2 = getEnvDouble("SCALE_CO2");
+    c.hum_addr = static_cast<uint16_t>(getenv_int("HUM_ADDR"));
+    c.hum_qty = getenv_int("HUM_QTY");
+    c.hum_scale = getenv_double("HUM_SCALE");
 
-    c.poll_interval_ms = (int)getEnvLong("POLL_INTERVAL_MS");
-    c.serial_read_timeout_ms = (int)getEnvLong("SERIAL_READ_TIMEOUT_MS");
+    c.co2_addr = static_cast<uint16_t>(getenv_int("CO2_ADDR"));
+    c.co2_qty = getenv_int("CO2_QTY");
+    c.co2_scale = getenv_double("CO2_SCALE");
 
-    c.initial_backoff_ms = (int)getEnvLong("INITIAL_BACKOFF_MS");
-    c.max_backoff_ms = (int)getEnvLong("MAX_BACKOFF_MS");
-    c.backoff_factor = getEnvDouble("BACKOFF_FACTOR");
-    if (c.backoff_factor < 1.0) {
-        log_line("BACKOFF_FACTOR must be >= 1.0");
+    c.poll_interval_ms = getenv_int("POLL_INTERVAL_MS");
+    c.read_timeout_ms = getenv_int("READ_TIMEOUT_MS");
+
+    c.retry_init_ms = getenv_int("RETRY_INIT_MS");
+    c.retry_max_ms = getenv_int("RETRY_MAX_MS");
+    c.retry_multiplier = getenv_double("RETRY_MULTIPLIER");
+    if (c.retry_multiplier < 1.0) {
+        std::cerr << "RETRY_MULTIPLIER must be >= 1.0" << std::endl;
         std::exit(1);
     }
 
     return c;
 }
 
-// CRC16 Modbus
-static uint16_t modbus_crc16(const uint8_t* data, size_t length) {
+// ===================== Modbus RTU Utilities =====================
+
+uint16_t modbus_crc16(const uint8_t *buf, size_t len) {
     uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < length; ++i) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; ++j) {
+    for (size_t pos = 0; pos < len; pos++) {
+        crc ^= (uint16_t)buf[pos];
+        for (int i = 0; i < 8; i++) {
             if (crc & 0x0001) {
                 crc >>= 1;
                 crc ^= 0xA001;
@@ -196,652 +180,510 @@ static uint16_t modbus_crc16(const uint8_t* data, size_t length) {
     return crc;
 }
 
-class SerialPort {
-public:
-    SerialPort(): fd_(-1) {}
-    ~SerialPort() { closePort(); }
+speed_t baud_to_speed_t(int baud) {
+    switch (baud) {
+        case 1200: return B1200;
+        case 2400: return B2400;
+        case 4800: return B4800;
+        case 9600: return B9600;
+        case 19200: return B19200;
+        case 38400: return B38400;
+        case 57600: return B57600;
+        case 115200: return B115200;
+        default:
+            std::cerr << "Unsupported SERIAL_BAUD: " << baud << std::endl;
+            std::exit(1);
+    }
+}
 
-    bool openPort(const Config& c) {
-        closePort();
-        int fd = ::open(c.serial_port.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
-        if (fd < 0) {
-            std::ostringstream oss; oss << "Failed to open serial port " << c.serial_port << ": " << strerror(errno);
-            log_line(oss.str());
-            return false;
-        }
-        struct termios tty;
-        memset(&tty, 0, sizeof tty);
-        if (tcgetattr(fd, &tty) != 0) {
-            std::ostringstream oss; oss << "tcgetattr failed: " << strerror(errno);
-            log_line(oss.str());
-            ::close(fd);
-            return false;
-        }
-
-        // Set speed
-        speed_t speed;
-        switch (c.serial_baud) {
-            case 1200: speed = B1200; break;
-            case 2400: speed = B2400; break;
-            case 4800: speed = B4800; break;
-            case 9600: speed = B9600; break;
-            case 19200: speed = B19200; break;
-            case 38400: speed = B38400; break;
-            case 57600: speed = B57600; break;
-            case 115200: speed = B115200; break;
-#ifdef B230400
-            case 230400: speed = B230400; break;
-#endif
-            default:
-                log_line("Unsupported baud rate");
-                ::close(fd);
-                return false;
-        }
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-
-        // Raw mode
-        tty.c_cflag = (tty.c_cflag & ~CSIZE);
-        switch (c.serial_data_bits) {
-            case 5: tty.c_cflag |= CS5; break;
-            case 6: tty.c_cflag |= CS6; break;
-            case 7: tty.c_cflag |= CS7; break;
-            case 8: tty.c_cflag |= CS8; break;
-            default:
-                log_line("Unsupported data bits");
-                ::close(fd);
-                return false;
-        }
-
-        // Parity
-        if (c.serial_parity == 'N') {
-            tty.c_cflag &= ~PARENB;
-        } else if (c.serial_parity == 'E') {
-            tty.c_cflag |= PARENB;
-            tty.c_cflag &= ~PARODD;
-        } else { // 'O'
-            tty.c_cflag |= PARENB;
-            tty.c_cflag |= PARODD;
-        }
-
-        // Stop bits
-        if (c.serial_stop_bits == 2) tty.c_cflag |= CSTOPB; else tty.c_cflag &= ~CSTOPB;
-
-        tty.c_cflag |= CLOCAL | CREAD;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_oflag &= ~OPOST;
-
-        tty.c_cc[VMIN] = 0;  // non-blocking read
-        tty.c_cc[VTIME] = 0; // we'll use select for timeout
-
-        if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-            std::ostringstream oss; oss << "tcsetattr failed: " << strerror(errno);
-            log_line(oss.str());
-            ::close(fd);
-            return false;
-        }
-
-        fd_ = fd;
-        return true;
+int open_serial(const Config &cfg) {
+    int fd = ::open(cfg.serial_port.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+    if (fd < 0) {
+        log_event("ERROR", std::string("open serial failed: ") + strerror(errno));
+        return -1;
     }
 
-    void closePort() {
+    struct termios tty;
+    memset(&tty, 0, sizeof tty);
+    if (tcgetattr(fd, &tty) != 0) {
+        log_event("ERROR", std::string("tcgetattr failed: ") + strerror(errno));
+        ::close(fd);
+        return -1;
+    }
+
+    cfmakeraw(&tty);
+
+    // Set baud rates
+    speed_t spd = baud_to_speed_t(cfg.serial_baud);
+    cfsetospeed(&tty, spd);
+    cfsetispeed(&tty, spd);
+
+    // Data bits
+    tty.c_cflag &= ~CSIZE;
+    if (cfg.serial_databits == 7) tty.c_cflag |= CS7;
+    else if (cfg.serial_databits == 8) tty.c_cflag |= CS8;
+    else {
+        log_event("ERROR", "Unsupported SERIAL_DATABITS (use 7 or 8)");
+        ::close(fd);
+        return -1;
+    }
+
+    // Parity
+    if (cfg.serial_parity == 'N') {
+        tty.c_cflag &= ~PARENB;
+    } else if (cfg.serial_parity == 'E') {
+        tty.c_cflag |= PARENB;
+        tty.c_cflag &= ~PARODD;
+    } else if (cfg.serial_parity == 'O') {
+        tty.c_cflag |= PARENB;
+        tty.c_cflag |= PARODD;
+    }
+
+    // Stop bits
+    if (cfg.serial_stopbits == 1) tty.c_cflag &= ~CSTOPB;
+    else if (cfg.serial_stopbits == 2) tty.c_cflag |= CSTOPB;
+    else {
+        log_event("ERROR", "Unsupported SERIAL_STOPBITS (use 1 or 2)");
+        ::close(fd);
+        return -1;
+    }
+
+    tty.c_cflag |= (CLOCAL | CREAD);
+
+    tty.c_cc[VMIN]  = 0;
+    tty.c_cc[VTIME] = 0; // We'll use select() for timeouts
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        log_event("ERROR", std::string("tcsetattr failed: ") + strerror(errno));
+        ::close(fd);
+        return -1;
+    }
+
+    tcflush(fd, TCIOFLUSH);
+    log_event("INFO", "Serial port opened: " + cfg.serial_port);
+    return fd;
+}
+
+std::vector<uint8_t> read_n_with_timeout(int fd, size_t n, int timeout_ms) {
+    std::vector<uint8_t> buf;
+    buf.reserve(n);
+    auto start = std::chrono::steady_clock::now();
+    while (buf.size() < n) {
+        auto now = std::chrono::steady_clock::now();
+        int elapsed_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        int remain_ms = timeout_ms - elapsed_ms;
+        if (remain_ms <= 0) {
+            return {};
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        struct timeval tv;
+        tv.tv_sec = remain_ms / 1000;
+        tv.tv_usec = (remain_ms % 1000) * 1000;
+        int rv = select(fd + 1, &rfds, nullptr, nullptr, &tv);
+        if (rv < 0) {
+            if (errno == EINTR) continue;
+            return {};
+        } else if (rv == 0) {
+            continue;
+        } else {
+            uint8_t tmp[256];
+            size_t to_read = std::min((size_t)sizeof(tmp), n - buf.size());
+            ssize_t r = ::read(fd, tmp, to_read);
+            if (r <= 0) {
+                return {};
+            }
+            buf.insert(buf.end(), tmp, tmp + r);
+        }
+    }
+    return buf;
+}
+
+bool modbus_read_holding_registers(int fd, uint8_t slave_id, uint16_t start_addr, uint16_t quantity, std::vector<uint16_t> &out, int timeout_ms) {
+    uint8_t req[8];
+    req[0] = slave_id;
+    req[1] = 0x03;
+    req[2] = (uint8_t)((start_addr >> 8) & 0xFF);
+    req[3] = (uint8_t)(start_addr & 0xFF);
+    req[4] = (uint8_t)((quantity >> 8) & 0xFF);
+    req[5] = (uint8_t)(quantity & 0xFF);
+    uint16_t crc = modbus_crc16(req, 6);
+    req[6] = (uint8_t)(crc & 0xFF);
+    req[7] = (uint8_t)((crc >> 8) & 0xFF);
+
+    ssize_t w = ::write(fd, req, sizeof(req));
+    if (w != (ssize_t)sizeof(req)) {
+        return false;
+    }
+    tcdrain(fd);
+
+    auto header = read_n_with_timeout(fd, 3, timeout_ms);
+    if (header.size() != 3) return false;
+
+    if (header[0] != slave_id) return false;
+    if (header[1] == (uint8_t)(0x80 | 0x03)) {
+        // Exception response
+        auto rest = read_n_with_timeout(fd, 2, timeout_ms); // exception code + CRC
+        return false;
+    }
+    if (header[1] != 0x03) return false;
+
+    uint8_t byte_count = header[2];
+    auto payload_crc = read_n_with_timeout(fd, byte_count + 2, timeout_ms);
+    if (payload_crc.size() != (size_t)(byte_count + 2)) return false;
+
+    // Build full frame to verify CRC
+    std::vector<uint8_t> frame;
+    frame.reserve(3 + byte_count + 2);
+    frame.insert(frame.end(), header.begin(), header.end());
+    frame.insert(frame.end(), payload_crc.begin(), payload_crc.end());
+
+    uint16_t recv_crc = (uint16_t)payload_crc[byte_count] | ((uint16_t)payload_crc[byte_count + 1] << 8);
+    uint16_t calc_crc = modbus_crc16(frame.data(), frame.size() - 2);
+    if (recv_crc != calc_crc) return false;
+
+    if (byte_count != (uint8_t)(quantity * 2)) return false;
+
+    out.clear();
+    out.reserve(quantity);
+    for (int i = 0; i < quantity; ++i) {
+        uint8_t hi = payload_crc[2 * i];
+        uint8_t lo = payload_crc[2 * i + 1];
+        uint16_t v = ((uint16_t)hi << 8) | (uint16_t)lo;
+        out.push_back(v);
+    }
+
+    return true;
+}
+
+// ===================== Shared State =====================
+
+struct Readings {
+    double temperature = 0.0;
+    double humidity = 0.0;
+    double co2 = 0.0;
+    bool temp_valid = false;
+    bool hum_valid = false;
+    bool co2_valid = false;
+    std::chrono::system_clock::time_point temp_ts{};
+    std::chrono::system_clock::time_point hum_ts{};
+    std::chrono::system_clock::time_point co2_ts{};
+};
+
+struct DriverState {
+    std::mutex mtx;
+    Readings readings;
+    std::atomic<bool> connected{false};
+    std::atomic<bool> polling_active{false};
+    std::chrono::system_clock::time_point last_poll_time{};
+};
+
+// ===================== Poller =====================
+
+class Poller {
+public:
+    Poller(const Config &cfg, DriverState &st) : cfg_(cfg), state_(st) {}
+
+    void start() {
+        stop_ = false;
+        th_ = std::thread(&Poller::run, this);
+    }
+    void stop() {
+        stop_ = true;
+        if (th_.joinable()) th_.join();
+    }
+
+private:
+    const Config &cfg_;
+    DriverState &state_;
+    std::thread th_;
+    std::atomic<bool> stop_{false};
+    int fd_ = -1;
+
+    void close_serial() {
         if (fd_ >= 0) {
             ::close(fd_);
             fd_ = -1;
         }
+        state_.connected.store(false);
+        log_event("INFO", "Serial port closed");
     }
 
-    bool isOpen() const { return fd_ >= 0; }
-
-    bool writeAll(const uint8_t* data, size_t len) {
-        if (fd_ < 0) return false;
-        size_t written = 0;
-        while (written < len) {
-            ssize_t w = ::write(fd_, data + written, len - written);
-            if (w < 0) {
-                if (errno == EINTR) continue;
-                std::ostringstream oss; oss << "Serial write error: " << strerror(errno);
-                log_line(oss.str());
-                return false;
-            }
-            written += (size_t)w;
+    bool ensure_serial_open() {
+        if (fd_ >= 0) return true;
+        fd_ = open_serial(cfg_);
+        if (fd_ >= 0) {
+            state_.connected.store(true);
+            return true;
         }
-        return true;
-    }
-
-    bool readExact(uint8_t* buf, size_t len, int timeout_ms) {
-        if (fd_ < 0) return false;
-        size_t read_total = 0;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        while (read_total < len) {
-            auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) {
-                return false; // timeout
-            }
-            int remaining_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(fd_, &rfds);
-            struct timeval tv;
-            tv.tv_sec = remaining_ms / 1000;
-            tv.tv_usec = (remaining_ms % 1000) * 1000;
-            int rv = select(fd_ + 1, &rfds, nullptr, nullptr, &tv);
-            if (rv < 0) {
-                if (errno == EINTR) continue;
-                std::ostringstream oss; oss << "Serial select error: " << strerror(errno);
-                log_line(oss.str());
-                return false;
-            } else if (rv == 0) {
-                return false; // timeout
-            }
-            ssize_t r = ::read(fd_, buf + read_total, len - read_total);
-            if (r < 0) {
-                if (errno == EINTR) continue;
-                std::ostringstream oss; oss << "Serial read error: " << strerror(errno);
-                log_line(oss.str());
-                return false;
-            } else if (r == 0) {
-                // No data
-                continue;
-            }
-            read_total += (size_t)r;
-        }
-        return true;
-    }
-
-private:
-    int fd_;
-};
-
-class ModbusRTU {
-public:
-    explicit ModbusRTU(SerialPort &sp) : sp_(sp) {}
-
-    bool readHoldingRegisters(uint8_t slave, uint16_t addr, uint16_t count, std::vector<uint16_t>& regs, int timeout_ms) {
-        // Build request: slave, 0x03, addr_hi, addr_lo, count_hi, count_lo, crc_lo, crc_hi
-        std::vector<uint8_t> req;
-        req.reserve(8);
-        req.push_back(slave);
-        req.push_back(0x03);
-        req.push_back((uint8_t)((addr >> 8) & 0xFF));
-        req.push_back((uint8_t)(addr & 0xFF));
-        req.push_back((uint8_t)((count >> 8) & 0xFF));
-        req.push_back((uint8_t)(count & 0xFF));
-        uint16_t crc = modbus_crc16(req.data(), req.size());
-        req.push_back((uint8_t)(crc & 0xFF));
-        req.push_back((uint8_t)((crc >> 8) & 0xFF));
-
-        // Flush I/O to reduce stale data
-        // tcflush requires fd, but we keep it private; we will rely on request-response order.
-
-        if (!sp_.writeAll(req.data(), req.size())) {
-            return false;
-        }
-        // Expected response: slave, 0x03, bytecount (2*count), data..., crc_lo, crc_hi
-        size_t expect_len = 5 + 2 * count; // 1 + 1 + 1 + 2*count + 2
-        std::vector<uint8_t> resp(expect_len);
-        if (!sp_.readExact(resp.data(), resp.size(), timeout_ms)) {
-            log_line("Modbus read timeout or error");
-            return false;
-        }
-        // Validate basic fields
-        if (resp[0] != slave) {
-            log_line("Modbus slave mismatch");
-            return false;
-        }
-        if (resp[1] == (uint8_t)(0x80 | 0x03)) {
-            log_line("Modbus exception response");
-            return false;
-        }
-        if (resp[1] != 0x03) {
-            log_line("Unexpected function code");
-            return false;
-        }
-        uint8_t bc = resp[2];
-        if (bc != (uint8_t)(2 * count)) {
-            log_line("Unexpected byte count in response");
-            return false;
-        }
-        // Validate CRC
-        uint16_t calc_crc = modbus_crc16(resp.data(), resp.size() - 2);
-        uint16_t resp_crc = (uint16_t)resp[resp.size() - 2] | ((uint16_t)resp[resp.size() - 1] << 8);
-        if (calc_crc != resp_crc) {
-            log_line("CRC mismatch in Modbus response");
-            return false;
-        }
-        regs.clear();
-        regs.reserve(count);
-        for (uint16_t i = 0; i < count; ++i) {
-            uint8_t hi = resp[3 + 2*i];
-            uint8_t lo = resp[3 + 2*i + 1];
-            uint16_t val = ((uint16_t)hi << 8) | (uint16_t)lo;
-            regs.push_back(val);
-        }
-        return true;
-    }
-
-private:
-    SerialPort &sp_;
-};
-
-struct LatestData {
-    double temperature = 0.0;
-    double humidity = 0.0;
-    double co2 = 0.0;
-    bool has_temp = false;
-    bool has_hum = false;
-    bool has_co2 = false;
-    std::chrono::system_clock::time_point ts_temp{};
-    std::chrono::system_clock::time_point ts_hum{};
-    std::chrono::system_clock::time_point ts_co2{};
-    std::mutex mtx;
-};
-
-struct StatusInfo {
-    bool connected = false;
-    bool polling_active = false;
-    std::string port;
-    int slave_id = 0;
-    int interval_ms = 0;
-    std::chrono::system_clock::time_point last_poll{};
-    std::mutex mtx;
-};
-
-class Poller {
-public:
-    Poller(const Config &cfg, LatestData &data, StatusInfo &status)
-        : cfg_(cfg), data_(data), status_(status) {}
-
-    void start() {
-        th_ = std::thread([this]{ this->run(); });
-    }
-
-    void join() {
-        if (th_.joinable()) th_.join();
-    }
-
-private:
-    void run() {
-        SerialPort sp;
-        ModbusRTU mb(sp);
-
-        int backoff_ms = cfg_.initial_backoff_ms;
-        {
-            std::lock_guard<std::mutex> lk(status_.mtx);
-            status_.polling_active = true;
-            status_.port = cfg_.serial_port;
-            status_.slave_id = cfg_.modbus_slave_id;
-            status_.interval_ms = cfg_.poll_interval_ms;
-        }
-
-        while (g_running.load()) {
-            if (!sp.isOpen()) {
-                log_line("Attempting to open serial port...");
-                if (sp.openPort(cfg_)) {
-                    log_line("Serial port opened successfully");
-                    std::lock_guard<std::mutex> lk(status_.mtx);
-                    status_.connected = true;
-                    backoff_ms = cfg_.initial_backoff_ms;
-                } else {
-                    std::lock_guard<std::mutex> lk(status_.mtx);
-                    status_.connected = false;
-                    log_line("Serial open failed, backing off");
-                    sleep_for(backoff_ms);
-                    backoff_ms = next_backoff(backoff_ms);
-                    continue;
-                }
-            }
-
-            bool ok = true;
-            std::vector<uint16_t> regs;
-            if (!mb.readHoldingRegisters((uint8_t)cfg_.modbus_slave_id, (uint16_t)cfg_.reg_temp_addr, 1, regs, cfg_.serial_read_timeout_ms)) {
-                ok = false;
-            } else {
-                double t = (double)regs[0] * cfg_.scale_temp;
-                auto now = std::chrono::system_clock::now();
-                {
-                    std::lock_guard<std::mutex> lk(data_.mtx);
-                    data_.temperature = t;
-                    data_.has_temp = true;
-                    data_.ts_temp = now;
-                }
-            }
-
-            if (ok) {
-                regs.clear();
-                if (!mb.readHoldingRegisters((uint8_t)cfg_.modbus_slave_id, (uint16_t)cfg_.reg_hum_addr, 1, regs, cfg_.serial_read_timeout_ms)) {
-                    ok = false;
-                } else {
-                    double h = (double)regs[0] * cfg_.scale_hum;
-                    auto now = std::chrono::system_clock::now();
-                    {
-                        std::lock_guard<std::mutex> lk(data_.mtx);
-                        data_.humidity = h;
-                        data_.has_hum = true;
-                        data_.ts_hum = now;
-                    }
-                }
-            }
-
-            if (ok) {
-                regs.clear();
-                if (!mb.readHoldingRegisters((uint8_t)cfg_.modbus_slave_id, (uint16_t)cfg_.reg_co2_addr, 1, regs, cfg_.serial_read_timeout_ms)) {
-                    ok = false;
-                } else {
-                    double c = (double)regs[0] * cfg_.scale_co2;
-                    auto now = std::chrono::system_clock::now();
-                    {
-                        std::lock_guard<std::mutex> lk(data_.mtx);
-                        data_.co2 = c;
-                        data_.has_co2 = true;
-                        data_.ts_co2 = now;
-                    }
-                }
-            }
-
-            auto now = std::chrono::system_clock::now();
-            {
-                std::lock_guard<std::mutex> lk(status_.mtx);
-                status_.last_poll = now;
-            }
-
-            if (!ok) {
-                log_line("Polling error detected; closing serial and backing off");
-                sp.closePort();
-                {
-                    std::lock_guard<std::mutex> lk(status_.mtx);
-                    status_.connected = false;
-                }
-                sleep_for(backoff_ms);
-                backoff_ms = next_backoff(backoff_ms);
-                continue;
-            }
-
-            // Sleep until next poll or shutdown
-            int slept = 0;
-            while (g_running.load() && slept < cfg_.poll_interval_ms) {
-                int step = std::min(100, cfg_.poll_interval_ms - slept);
-                sleep_for(step);
-                slept += step;
-            }
-        }
-        log_line("Poller stopping");
-    }
-
-    void sleep_for(int ms) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-    }
-
-    int next_backoff(int current_ms) {
-        double next = (double)current_ms * cfg_.backoff_factor;
-        if (next > (double)cfg_.max_backoff_ms) next = (double)cfg_.max_backoff_ms;
-        return (int)next;
-    }
-
-    const Config &cfg_;
-    LatestData &data_;
-    StatusInfo &status_;
-    std::thread th_;
-};
-
-class HttpServer {
-public:
-    HttpServer(const Config &cfg, LatestData &data, StatusInfo &status) : cfg_(cfg), data_(data), status_(status), listen_fd_(-1) {}
-
-    bool start() {
-        struct addrinfo hints; memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC; // Support IPv4/IPv6 if possible
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_flags = AI_PASSIVE;
-
-        struct addrinfo *res = nullptr;
-        int rv = getaddrinfo(cfg_.http_host.c_str(), std::to_string(cfg_.http_port).c_str(), &hints, &res);
-        if (rv != 0) {
-            std::ostringstream oss; oss << "getaddrinfo: " << gai_strerror(rv);
-            log_line(oss.str());
-            return false;
-        }
-
-        int fd = -1;
-        for (struct addrinfo *p = res; p; p = p->ai_next) {
-            fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-            if (fd < 0) continue;
-            int opt = 1;
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
-            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
-            if (::bind(fd, p->ai_addr, p->ai_addrlen) == 0) {
-                if (::listen(fd, 16) == 0) {
-                    listen_fd_ = fd;
-                    freeaddrinfo(res);
-                    log_line("HTTP server listening");
-                    th_ = std::thread([this]{ this->accept_loop(); });
-                    return true;
-                }
-            }
-            ::close(fd);
-            fd = -1;
-        }
-        freeaddrinfo(res);
-        log_line("Failed to bind/listen HTTP server");
+        state_.connected.store(false);
         return false;
     }
 
-    void stop() {
-        if (listen_fd_ >= 0) {
-            ::shutdown(listen_fd_, SHUT_RDWR);
-            ::close(listen_fd_);
-            listen_fd_ = -1;
-        }
-    }
-
-    void join() {
-        if (th_.joinable()) th_.join();
-    }
-
-private:
-    void accept_loop() {
-        while (g_running.load()) {
-            fd_set rfds; FD_ZERO(&rfds); FD_SET(listen_fd_, &rfds);
-            struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
-            int rv = select(listen_fd_+1, &rfds, nullptr, nullptr, &tv);
-            if (rv < 0) {
-                if (errno == EINTR) continue;
-                log_line("HTTP server select error");
-                break;
-            } else if (rv == 0) {
-                continue; // timeout, check running
-            }
-
-            struct sockaddr_storage addr; socklen_t addrlen = sizeof(addr);
-            int cfd = ::accept(listen_fd_, (struct sockaddr*)&addr, &addrlen);
-            if (cfd < 0) {
-                if (errno == EINTR) continue;
-                if (!g_running.load()) break;
-                log_line("HTTP accept error");
-                continue;
-            }
-            std::thread(&HttpServer::handle_client, this, cfd).detach();
-        }
-        log_line("HTTP server stopping");
-    }
-
-    void handle_client(int cfd) {
-        // Read request (simple, up to 8KB)
-        std::string req;
-        req.reserve(8192);
-        char buf[1024];
-        bool header_done = false;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!header_done) {
-            auto now = std::chrono::steady_clock::now();
-            if (now >= deadline) break;
-            fd_set rfds; FD_ZERO(&rfds); FD_SET(cfd, &rfds);
-            struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 200000;
-            int rv = select(cfd+1, &rfds, nullptr, nullptr, &tv);
-            if (rv < 0) {
-                if (errno == EINTR) continue;
-                break;
-            } else if (rv == 0) {
-                continue;
-            }
-            ssize_t r = ::read(cfd, buf, sizeof(buf));
-            if (r <= 0) break;
-            req.append(buf, buf + r);
-            if (req.find("\r\n\r\n") != std::string::npos) header_done = true;
-            if (req.size() > 8192) break;
-        }
-        std::string method, path;
-        parse_request_line(req, method, path);
-
-        if (method != "GET") {
-            std::string body = "{""error"": ""method not allowed""}";
-            send_response(cfd, 405, "Method Not Allowed", body);
-            ::close(cfd);
-            return;
-        }
-
-        if (path == "/status") {
-            send_status(cfd);
-        } else if (path == "/readings") {
-            send_readings(cfd);
+    bool read_scaled(uint16_t addr, int qty, double scale, double &out_val) {
+        std::vector<uint16_t> regs;
+        bool ok = modbus_read_holding_registers(fd_, (uint8_t)cfg_.slave_id, addr, (uint16_t)qty, regs, cfg_.read_timeout_ms);
+        if (!ok) return false;
+        if (qty == 1) {
+            out_val = (double)regs[0] * scale;
+            return true;
+        } else if (qty == 2) {
+            uint32_t v32 = ((uint32_t)regs[0] << 16) | (uint32_t)regs[1];
+            out_val = (double)v32 * scale;
+            return true;
         } else {
-            std::string body = "{""error"": ""not found""}";
-            send_response(cfd, 404, "Not Found", body);
+            // For qty > 2, not supported
+            return false;
         }
-        ::close(cfd);
     }
 
-    void parse_request_line(const std::string &req, std::string &method, std::string &path) {
-        method.clear(); path.clear();
-        size_t pos = req.find("\r\n");
-        if (pos == std::string::npos) return;
-        std::string line = req.substr(0, pos);
-        std::istringstream iss(line);
-        iss >> method >> path; // ignore HTTP version
-    }
-
-    void send_response(int cfd, int code, const std::string &status, const std::string &body) {
-        std::ostringstream oss;
-        oss << "HTTP/1.1 " << code << " " << status << "\r\n";
-        oss << "Content-Type: application/json\r\n";
-        oss << "Content-Length: " << body.size() << "\r\n";
-        oss << "Connection: close\r\n\r\n";
-        std::string hdr = oss.str();
-        ::write(cfd, hdr.data(), hdr.size());
-        ::write(cfd, body.data(), body.size());
-    }
-
-    void send_status(int cfd) {
-        bool connected; bool polling; std::string port; int slave; int interval; std::string last_poll_ts = "null";
-        {
-            std::lock_guard<std::mutex> lk(status_.mtx);
-            connected = status_.connected;
-            polling = status_.polling_active;
-            port = status_.port;
-            slave = status_.slave_id;
-            interval = status_.interval_ms;
-            if (status_.last_poll.time_since_epoch().count() != 0) {
-                last_poll_ts = '"' + to_iso8601(status_.last_poll) + '"';
+    void run() {
+        int backoff_ms = cfg_.retry_init_ms;
+        while (!stop_) {
+            if (!ensure_serial_open()) {
+                log_event("WARN", "Failed to open serial. Backing off " + std::to_string(backoff_ms) + " ms");
+                sleep_ms(backoff_ms);
+                backoff_ms = std::min((int)(backoff_ms * cfg_.retry_multiplier), cfg_.retry_max_ms);
+                continue;
             }
-        }
-        std::ostringstream body;
-        body << "{";
-        body << "\"connected\":" << (connected ? "true" : "false") << ",";
-        body << "\"port\":\"" << escape_json(port) << "\",";
-        body << "\"slave_id\":" << slave << ",";
-        body << "\"polling_active\":" << (polling ? "true" : "false") << ",";
-        body << "\"interval_ms\":" << interval << ",";
-        body << "\"last_poll_time\":" << last_poll_ts;
-        body << "}";
-        send_response(cfd, 200, "OK", body.str());
-    }
 
-    void send_readings(int cfd) {
-        double t=0, h=0, c=0; bool ht=false, hh=false, hc=false; std::string tts="null", hts="null", cts="null";
-        {
-            std::lock_guard<std::mutex> lk(data_.mtx);
-            if (data_.has_temp) { t = data_.temperature; ht = true; tts = '"' + to_iso8601(data_.ts_temp) + '"'; }
-            if (data_.has_hum)  { h = data_.humidity;   hh = true; hts = '"' + to_iso8601(data_.ts_hum) + '"'; }
-            if (data_.has_co2)  { c = data_.co2;        hc = true; cts = '"' + to_iso8601(data_.ts_co2) + '"'; }
-        }
-        std::ostringstream body;
-        body << "{";
-        body << "\"temperature\":" << (ht ? num_to_json(t) : std::string("null")) << ",";
-        body << "\"humidity\":" << (hh ? num_to_json(h) : std::string("null")) << ",";
-        body << "\"co2\":" << (hc ? num_to_json(c) : std::string("null")) << ",";
-        body << "\"temperature_ts\":" << tts << ",";
-        body << "\"humidity_ts\":" << hts << ",";
-        body << "\"co2_ts\":" << cts;
-        body << "}";
-        send_response(cfd, 200, "OK", body.str());
-    }
+            state_.polling_active.store(true);
 
-    static std::string escape_json(const std::string &s) {
-        std::ostringstream oss;
-        for (char ch : s) {
-            switch (ch) {
-                case '"': oss << "\\\""; break;
-                case '\\': oss << "\\\\"; break;
-                case '\n': oss << "\\n"; break;
-                case '\r': oss << "\\r"; break;
-                case '\t': oss << "\\t"; break;
-                default:
-                    if ((unsigned char)ch < 0x20) {
-                        oss << "\\u" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << (int)(unsigned char)ch << std::dec;
-                    } else {
-                        oss << ch;
-                    }
+            auto poll_start = std::chrono::steady_clock::now();
+            bool any_fail = false;
+            double val = 0.0;
+
+            // Temperature
+            if (read_scaled(cfg_.temp_addr, cfg_.temp_qty, cfg_.temp_scale, val)) {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.readings.temperature = val;
+                state_.readings.temp_valid = true;
+                state_.readings.temp_ts = std::chrono::system_clock::now();
+            } else { any_fail = true; }
+
+            // Humidity
+            if (read_scaled(cfg_.hum_addr, cfg_.hum_qty, cfg_.hum_scale, val)) {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.readings.humidity = val;
+                state_.readings.hum_valid = true;
+                state_.readings.hum_ts = std::chrono::system_clock::now();
+            } else { any_fail = true; }
+
+            // CO2
+            if (read_scaled(cfg_.co2_addr, cfg_.co2_qty, cfg_.co2_scale, val)) {
+                std::lock_guard<std::mutex> lk(state_.mtx);
+                state_.readings.co2 = val;
+                state_.readings.co2_valid = true;
+                state_.readings.co2_ts = std::chrono::system_clock::now();
+            } else { any_fail = true; }
+
+            state_.last_poll_time = std::chrono::system_clock::now();
+            if (any_fail) {
+                log_event("ERROR", "Polling error occurred. Closing serial and backing off " + std::to_string(backoff_ms) + " ms");
+                close_serial();
+                sleep_ms(backoff_ms);
+                backoff_ms = std::min((int)(backoff_ms * cfg_.retry_multiplier), cfg_.retry_max_ms);
+                continue;
+            } else {
+                // Success; reset backoff
+                backoff_ms = cfg_.retry_init_ms;
             }
+
+            // sleep until next poll
+            auto poll_end = std::chrono::steady_clock::now();
+            int elapsed = (int)std::chrono::duration_cast<std::chrono::milliseconds>(poll_end - poll_start).count();
+            int wait_ms = cfg_.poll_interval_ms - elapsed;
+            if (wait_ms < 0) wait_ms = 0;
+            sleep_ms(wait_ms);
         }
-        return oss.str();
+        state_.polling_active.store(false);
+        close_serial();
     }
 
-    static std::string num_to_json(double v) {
-        std::ostringstream oss;
-        oss.setf(std::ios::fixed); oss << std::setprecision(6) << v;
-        return oss.str();
+    void sleep_ms(int ms) {
+        if (ms <= 0) return;
+        auto start = std::chrono::steady_clock::now();
+        while (!stop_) {
+            auto now = std::chrono::steady_clock::now();
+            int elapsed = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+            if (elapsed >= ms) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     }
-
-    const Config &cfg_;
-    LatestData &data_;
-    StatusInfo &status_;
-    int listen_fd_;
-    std::thread th_;
 };
 
+// ===================== HTTP Server =====================
+
+std::string json_escape(const std::string &s) {
+    std::ostringstream oss;
+    for (char c : s) {
+        switch (c) {
+            case '"': oss << "\\\""; break;
+            case '\\': oss << "\\\\"; break;
+            case '\n': oss << "\\n"; break;
+            case '\r': oss << "\\r"; break;
+            case '\t': oss << "\\t"; break;
+            default: oss << c; break;
+        }
+    }
+    return oss.str();
+}
+
+void send_http_response(int client, int status_code, const std::string &body) {
+    std::ostringstream oss;
+    const char *status_text = (status_code == 200) ? "OK" : (status_code == 404 ? "Not Found" : "Error");
+    oss << "HTTP/1.1 " << status_code << " " << status_text << "\r\n";
+    oss << "Content-Type: application/json\r\n";
+    oss << "Content-Length: " << body.size() << "\r\n";
+    oss << "Connection: close\r\n\r\n";
+    std::string headers = oss.str();
+    ::send(client, headers.data(), headers.size(), 0);
+    ::send(client, body.data(), body.size(), 0);
+}
+
+std::string build_status_json(const Config &cfg, const DriverState &state) {
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"connected\": " << (state.connected.load() ? "true" : "false") << ", ";
+    oss << "\"port\": \"" << json_escape(cfg.serial_port) << "\", ";
+    oss << "\"slave_id\": " << cfg.slave_id << ", ";
+    oss << "\"polling_active\": " << (state.polling_active.load() ? "true" : "false") << ", ";
+    oss << "\"interval_ms\": " << cfg.poll_interval_ms << ", ";
+    oss << "\"last_poll_time\": \"" << json_escape(format_time_point(state.last_poll_time)) << "\"";
+    oss << "}";
+    return oss.str();
+}
+
+std::string build_readings_json(const DriverState &state) {
+    std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(state.mtx));
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"temperature\": { \"value\": ";
+    if (state.readings.temp_valid) oss << state.readings.temperature; else oss << "null";
+    oss << ", \"updated_at\": \"" << json_escape(format_time_point(state.readings.temp_ts)) << "\" }, ";
+
+    oss << "\"humidity\": { \"value\": ";
+    if (state.readings.hum_valid) oss << state.readings.humidity; else oss << "null";
+    oss << ", \"updated_at\": \"" << json_escape(format_time_point(state.readings.hum_ts)) << "\" }, ";
+
+    oss << "\"co2\": { \"value\": ";
+    if (state.readings.co2_valid) oss << state.readings.co2; else oss << "null";
+    oss << ", \"updated_at\": \"" << json_escape(format_time_point(state.readings.co2_ts)) << "\" }";
+
+    oss << "}";
+    return oss.str();
+}
+
+void handle_client(int client, const Config &cfg, const DriverState &state) {
+    char buf[4096];
+    ssize_t n = recv(client, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+        ::close(client);
+        return;
+    }
+    buf[n] = '\0';
+    std::string req(buf);
+
+    // Parse first line
+    size_t pos = req.find("\r\n");
+    if (pos == std::string::npos) pos = req.find('\n');
+    std::string line = (pos == std::string::npos) ? req : req.substr(0, pos);
+    std::istringstream iss(line);
+    std::string method, path, version;
+    iss >> method >> path >> version;
+
+    if (method != "GET") {
+        send_http_response(client, 404, "{\"error\": \"Only GET supported\"}");
+        ::close(client);
+        return;
+    }
+
+    if (path == "/status") {
+        std::string body = build_status_json(cfg, state);
+        send_http_response(client, 200, body);
+    } else if (path == "/readings") {
+        std::string body = build_readings_json(state);
+        send_http_response(client, 200, body);
+    } else {
+        send_http_response(client, 404, "{\"error\": \"Not Found\"}");
+    }
+    ::close(client);
+}
+
+void http_server(const Config &cfg, const DriverState &state) {
+    int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        log_event("ERROR", std::string("socket failed: ") + strerror(errno));
+        return;
+    }
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(cfg.http_port);
+    if (inet_pton(AF_INET, cfg.http_host.c_str(), &addr.sin_addr) <= 0) {
+        log_event("ERROR", "Invalid HTTP_HOST address");
+        ::close(server_fd);
+        return;
+    }
+
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        log_event("ERROR", std::string("bind failed: ") + strerror(errno));
+        ::close(server_fd);
+        return;
+    }
+
+    if (listen(server_fd, 16) < 0) {
+        log_event("ERROR", std::string("listen failed: ") + strerror(errno));
+        ::close(server_fd);
+        return;
+    }
+
+    log_event("INFO", "HTTP server listening on " + cfg.http_host + ":" + std::to_string(cfg.http_port));
+
+    while (!g_stop.load()) {
+        sockaddr_in cli{};
+        socklen_t clilen = sizeof(cli);
+        int client = accept(server_fd, (struct sockaddr*)&cli, &clilen);
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            if (g_stop.load()) break;
+            log_event("ERROR", std::string("accept failed: ") + strerror(errno));
+            continue;
+        }
+        std::thread([client, &cfg, &state]() {
+            handle_client(client, cfg, state);
+        }).detach();
+    }
+
+    ::close(server_fd);
+    log_event("INFO", "HTTP server stopped");
+}
+
+// ===================== Main =====================
+
+DriverState g_state;
+
+void signal_handler(int) {
+    g_stop.store(true);
+}
+
 int main() {
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
 
     Config cfg = load_config();
-    log_line("Configuration loaded");
 
-    LatestData data;
-    StatusInfo status;
-
-    Poller poller(cfg, data, status);
+    Poller poller(cfg, g_state);
     poller.start();
 
-    HttpServer server(cfg, data, status);
-    if (!server.start()) {
-        log_line("Failed to start HTTP server");
-        g_running.store(false);
-    }
+    http_server(cfg, g_state);
 
-    while (g_running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
+    g_stop.store(true);
+    poller.stop();
 
-    log_line("Shutting down...");
-    server.stop();
-    server.join();
-    poller.join();
-
-    log_line("Exited cleanly");
+    log_event("INFO", "Driver shutdown complete");
     return 0;
 }
