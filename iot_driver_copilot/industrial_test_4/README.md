@@ -1,77 +1,97 @@
-Industrial Modbus RTU Environmental Sensor Driver (HTTP)
+Industrial test4 Modbus RTU -> HTTP Driver (Python)
 
-This driver connects to an industrial environmental sensor over Modbus RTU (RS-485, 9600 baud, 8N1), periodically polls holding registers via function code 0x03, and exposes a minimal HTTP API to manage the connection and observe status and latest readings.
+This driver connects to an industrial environmental sensor over Modbus RTU (RS-485, 9600 8N1) and exposes a minimal HTTP API to manage the connection and retrieve current status plus latest sensor readings (temperature, humidity, CO₂). The driver actively polls the sensor via Modbus function code 0x03 (Read Holding Registers) and maintains a thread-safe buffer for fast HTTP responses.
 
-Requirements
-- Python 3.8+
-- RS-485/serial interface accessible by the host system
-- The sensor must support Modbus RTU function 0x03 for the specified registers
+Endpoints (only these are implemented)
+- POST /connect
+  - Open the RS-485 serial connection to the Modbus RTU sensor.
+  - Body JSON: { "port": "/dev/ttyUSB0" | "COM3", "slave_id": 1-247 }
+  - If already connected to the same port and slave, this is a no-op; otherwise the link is reinitialized.
+- GET /status
+  - Returns connection and polling status and the latest sample.
+  - Example fields: connected, port, slave_id, poll.enabled, poll.interval_ms, last_read_at, last_error, sample.temperature, sample.humidity, sample.co2.
 
-Install
-- Create and activate a virtual environment (optional)
-- Install dependencies:
-  pip install -r requirements.txt
+Configuration via environment variables
+All configuration must be provided through environment variables. No hard-coded configuration values are used.
 
-Environment Variables (required)
-- HTTP_HOST: Host/IP for the HTTP server (e.g., 0.0.0.0)
-- HTTP_PORT: Port for the HTTP server (e.g., 8000)
-- MODBUS_PORT: Serial port for RS-485 (e.g., /dev/ttyUSB0 or COM3)
-- MODBUS_SLAVE_ID: Modbus unit ID (1–247)
+Required
+- HTTP_HOST: HTTP server bind host (e.g., 0.0.0.0)
+- HTTP_PORT: HTTP server port (e.g., 8080)
+- MODBUS_TIMEOUT_MS: Serial read timeout in milliseconds (e.g., 500)
 - POLL_INTERVAL_MS: Polling interval in milliseconds (e.g., 1000)
-- MODBUS_TIMEOUT_S: Modbus request timeout in seconds (e.g., 1.5)
-- RETRY_MAX: Consecutive read errors before forcing reconnect (e.g., 3)
-- BACKOFF_INITIAL_MS: Initial reconnect backoff in ms (e.g., 500)
-- BACKOFF_MAX_MS: Maximum reconnect backoff in ms (e.g., 10000)
-- REG_TEMPERATURE_ADDR: Holding register address for temperature (e.g., 100)
-- REG_HUMIDITY_ADDR: Holding register address for humidity (e.g., 101)
-- REG_CO2_ADDR: Holding register address for CO₂ (e.g., 102)
-- SCALE_TEMPERATURE: Multiplicative scale applied to raw temperature (e.g., 0.1)
-- SCALE_HUMIDITY: Multiplicative scale applied to raw humidity (e.g., 0.1)
-- SCALE_CO2: Multiplicative scale applied to raw CO₂ (e.g., 1.0)
+- BACKOFF_INITIAL_MS: Initial backoff in milliseconds after failures (e.g., 1000)
+- BACKOFF_MAX_MS: Maximum backoff in milliseconds (e.g., 10000)
+- RETRY_MAX: Number of immediate retry attempts per poll cycle before backoff (e.g., 3)
+- REG_TEMP_ADDR: Holding register address for temperature (0-65535)
+- REG_HUM_ADDR: Holding register address for humidity (0-65535)
+- REG_CO2_ADDR: Holding register address for CO₂ (0-65535)
+
+Optional
+- MODBUS_PORT: Serial port path (e.g., /dev/ttyUSB0 or COM3). Can alternatively be provided in POST /connect.
+- MODBUS_SLAVE_ID: Modbus slave ID (1-247). Can alternatively be provided in POST /connect.
+- REG_TEMP_SCALE: Optional numeric scaling factor for temperature (applied as value = raw * scale)
+- REG_HUM_SCALE: Optional numeric scaling factor for humidity (applied as value = raw * scale)
+- REG_CO2_SCALE: Optional numeric scaling factor for CO₂ (applied as value = raw * scale)
 
 Notes
-- The driver does not hard-code device-specific addresses or scaling. You must provide them via environment variables.
-- The serial link uses 9600 baud, 8 data bits, no parity, 1 stop bit (8N1), and function code 0x03 to read holding registers.
+- The device link is opened at 9600 baud, 8 data bits, no parity, 1 stop bit (8N1) as required by the device specification.
+- Function code 0x03 is used to read holding registers.
+- The driver polls three individual 16-bit registers (temperature, humidity, CO₂). If your device uses different register mappings or data widths/scales, set the appropriate addresses and scaling factors accordingly.
+
+Install dependencies
+- Python 3.9+
+- pyserial
+
+Install:
+  pip install pyserial
 
 Run
-- Export environment variables (example):
+Example (Linux):
   export HTTP_HOST=0.0.0.0
-  export HTTP_PORT=8000
-  export MODBUS_PORT=/dev/ttyUSB0
-  export MODBUS_SLAVE_ID=1
+  export HTTP_PORT=8080
+  export MODBUS_TIMEOUT_MS=500
   export POLL_INTERVAL_MS=1000
-  export MODBUS_TIMEOUT_S=1.5
-  export RETRY_MAX=3
-  export BACKOFF_INITIAL_MS=500
+  export BACKOFF_INITIAL_MS=1000
   export BACKOFF_MAX_MS=10000
-  export REG_TEMPERATURE_ADDR=100
-  export REG_HUMIDITY_ADDR=101
-  export REG_CO2_ADDR=102
-  export SCALE_TEMPERATURE=0.1
-  export SCALE_HUMIDITY=0.1
-  export SCALE_CO2=1.0
-
-- Start the driver:
+  export RETRY_MAX=3
+  export REG_TEMP_ADDR=0
+  export REG_HUM_ADDR=1
+  export REG_CO2_ADDR=2
   python3 driver.py
 
-HTTP API
-- POST /connect
-  Purpose: Open the RS‑485 serial connection and start polling. Body parameters are optional; if omitted, the driver uses environment variables. If already connected to the same target, this is a no-op.
-  Example:
-  curl -X POST http://localhost:8000/connect -H 'Content-Type: application/json' -d '{"port":"/dev/ttyUSB0","slave_id":1}'
+Connect to the device (example on Linux):
+  curl -sS -X POST http://localhost:8080/connect \
+    -H 'Content-Type: application/json' \
+    -d '{"port":"/dev/ttyUSB0","slave_id":1}' | jq
 
-- GET /status
-  Purpose: Check connection and polling status, latest timestamps, last error, and the latest sensor readings (temperature, humidity, CO₂).
-  Example:
-  curl http://localhost:8000/status
+Check status:
+  curl -sS http://localhost:8080/status | jq
 
-Security
-- This simple driver exposes no authentication; place it behind appropriate network controls if required.
+Status response example
+{
+  "connected": true,
+  "port": "/dev/ttyUSB0",
+  "slave_id": 1,
+  "baud": 9600,
+  "parity": "N",
+  "stopbits": 1,
+  "poll": {"enabled": true, "interval_ms": 1000},
+  "last_read_at": "2025-01-01T12:00:00+0000",
+  "last_error": null,
+  "sample": {
+    "temperature": 23.4,
+    "humidity": 45.8,
+    "co2": 550,
+    "raw": {"temperature": 234, "humidity": 458, "co2": 550},
+    "timestamp": "2025-01-01T12:00:00+0000"
+  }
+}
 
-Graceful Shutdown
-- Ctrl+C or SIGTERM cleanly stops background polling and closes the serial connection.
+Graceful shutdown
+Press Ctrl+C or send SIGTERM. The driver stops the background poller and closes the serial port cleanly.
 
-License
-- For demonstration and integration purposes.
+Security considerations
+- The HTTP server binds to HTTP_HOST and port provided. Ensure proper network isolation when binding to 0.0.0.0.
+- No credentials or authentication are implemented; deploy behind a secure gateway if needed.
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
