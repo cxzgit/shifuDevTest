@@ -1,27 +1,32 @@
-# Multi-stage build for a small production image
-FROM alpine:3.19 AS build
+# syntax=docker/dockerfile:1
 
-WORKDIR /usr/src/app
-# Copy source and dependency file first
-COPY Makefile driver.cpp config.cpp serial_port.cpp modbus_rtu.cpp http_server.cpp ./
+FROM alpine:3.20 AS builder
+
+WORKDIR /app
 
 # Install build prerequisites
 RUN apk add --no-cache build-base
 
-# Build the driver using the Makefile
+# Copy source files and build manifest
+COPY . /app
+
+# Build the driver
 RUN make
 
-# Final runtime image
-FROM alpine:3.19
+# Runtime image
+FROM alpine:3.20
 
-# Install C++ runtime
-RUN apk add --no-cache libstdc++
+# Create a non-root user for security
+RUN adduser -D -u 10001 appuser
 
-WORKDIR /app
-COPY --from=build /usr/src/app/driver /usr/local/bin/driver
+# Copy the built binary
+COPY --from=builder /app/driver /usr/local/bin/driver
 
-# Typical HTTP port (actual port is defined via env HTTP_PORT)
+# Switch to the non-root user
+USER appuser
+
+# Expose default port (actual port is set via HTTP_PORT env)
 EXPOSE 8000
 
-# The driver requires environment variables to be provided at runtime
+# Run the driver
 ENTRYPOINT ["/usr/local/bin/driver"]
