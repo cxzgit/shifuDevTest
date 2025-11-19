@@ -1,32 +1,40 @@
-# syntax=docker/dockerfile:1
+# Multi-stage build for C++17 Modbus RTU HTTP driver
 
+# Builder stage
 FROM alpine:3.20 AS builder
-
 WORKDIR /app
-
+# Copy source and build files first
+COPY . /app
 # Install build prerequisites
 RUN apk add --no-cache build-base
-
-# Copy source files and build manifest
-COPY . /app
-
-# Build the driver
+# Build the driver using the generated Makefile
 RUN make
 
-# Runtime image
+# Runtime stage
 FROM alpine:3.20
+WORKDIR /app
+# Install runtime prerequisites (C++ stdlib)
+RUN apk add --no-cache libstdc++
+# Copy built binary
+COPY --from=builder /app/driver /app/driver
 
-# Create a non-root user for security
-RUN adduser -D -u 10001 appuser
+# Default environment values (can be overridden at runtime)
+ENV HTTP_HOST=0.0.0.0 \
+    HTTP_PORT=8080 \
+    SERIAL_PORT=/dev/ttyUSB0 \
+    SERIAL_BAUD=9600 \
+    MODBUS_SLAVE_ID=1 \
+    REG_TEMP_ADDR=0 \
+    REG_HUM_ADDR=1 \
+    REG_CO2_ADDR=2 \
+    TEMP_SCALE=1 \
+    HUM_SCALE=1 \
+    CO2_SCALE=1 \
+    POLL_INTERVAL_MS=1000 \
+    READ_TIMEOUT_MS=500 \
+    BACKOFF_INITIAL_MS=500 \
+    BACKOFF_MAX_MS=10000
 
-# Copy the built binary
-COPY --from=builder /app/driver /usr/local/bin/driver
+EXPOSE 8080
 
-# Switch to the non-root user
-USER appuser
-
-# Expose default port (actual port is set via HTTP_PORT env)
-EXPOSE 8000
-
-# Run the driver
-ENTRYPOINT ["/usr/local/bin/driver"]
+ENTRYPOINT ["/app/driver"]
