@@ -63,7 +63,7 @@ spec:
             - name: EDGEDEVICE_NAMESPACE
               value: "devices"
             - name: NATS_SERVER_URL
-              value: "nats://192.168.2.3:80"
+              value: "nats://192.168.2.97:4222"
             - name: NATS_TOPIC
               value: "test2.dfdg.gps.data"
             - name: NATS_PUBLISH_INTERVAL
