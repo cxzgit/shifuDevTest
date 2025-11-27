@@ -5,10 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy dependency manifest first and install dependencies
+# Copy dependency manifest and install dependencies first
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /app/requirements.txt \
+    && pip install --no-cache-dir -r requirements.txt \
     && addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Copy driver source code
