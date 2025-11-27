@@ -1,93 +1,74 @@
-Industrial Environmental Sensor Modbus RTU to HTTP Driver (C++)
+Industrial Temperature & Humidity Sensor HTTP Driver
 
 Overview
-- Connects to an RS-485 Modbus RTU environmental sensor and exposes a lightweight HTTP API.
-- Periodically polls holding registers (function 0x03) for temperature, humidity, and CO2.
-- Converts raw Modbus RTU data to JSON over HTTP.
+- Connects to a Modbus TCP temperature/humidity sensor, polls readings, and exposes them over an HTTP REST API.
+- Periodic poll with resiliency: timeout, configurable retry count, and exponential backoff on failures.
+- Maintains a thread-safe buffer of the latest reading and returns it quickly via HTTP.
+- Logs key events: connect/disconnect, retries, errors, and last-update timestamps.
 
-Build
-- Requirements: g++ (C++17), POSIX system (Linux recommended) with RS-485/serial access.
-- Compile:
-  g++ -std=c++17 -O2 -pthread driver.cpp -o driver
+Requirements
+- Python 3.8+
+- Network access to the Modbus TCP device
 
-Run
-- Ensure the required environment variables are set (see below).
-- Start the driver (runs HTTP server):
-  HTTP_HOST=0.0.0.0 HTTP_PORT=8080 MODBUS_PORT=/dev/ttyUSB0 MODBUS_SLAVE_ID=1 \
-  TEMP_REG_ADDR=0 HUM_REG_ADDR=1 CO2_REG_ADDR=2 \
-  ./driver
-
-Environment Variables
-HTTP server
-- HTTP_HOST: Interface to bind (default: 0.0.0.0)
-- HTTP_PORT: TCP port (default: 8080)
-
-Modbus/Serial link
-- MODBUS_PORT: Serial device path (e.g., /dev/ttyUSB0). Required.
-- MODBUS_SLAVE_ID: Sensor Slave ID (1–247). Required.
-- MODBUS_BAUD: Baud rate (default: 9600). Supported: 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200.
-- MODBUS_DATA_BITS: Data bits (default: 8)
-- MODBUS_PARITY: Parity N/E/O (default: N)
-- MODBUS_STOP_BITS: Stop bits (default: 1)
-- MODBUS_TIMEOUT_MS: Per-request timeout in ms (default: 1000)
-
-Polling and resilience
-- POLL_INTERVAL_MS: Initial poll interval in ms (default: 1000)
-- BACKOFF_INITIAL_MS: Initial backoff on error in ms (default: 500)
-- BACKOFF_MAX_MS: Maximum backoff on error in ms (default: 5000)
-
-Register mapping per measurement
-- TEMP_REG_ADDR: Start address for temperature (Required)
-- TEMP_REG_COUNT: Number of registers (1 or 2, default: 1)
-- TEMP_TYPE: Data type (uint16, int16, uint32, int32, float32; default: uint16)
-- TEMP_ENDIAN: Word order for 32-bit types be/le (default: be)
-- TEMP_SCALE: Multiplier applied to parsed value (default: 1.0)
-
-- HUM_REG_ADDR: Start address for humidity (Required)
-- HUM_REG_COUNT: Number of registers (1 or 2, default: 1)
-- HUM_TYPE: Data type (uint16, int16, uint32, int32, float32; default: uint16)
-- HUM_ENDIAN: Word order for 32-bit types be/le (default: be)
-- HUM_SCALE: Multiplier applied to parsed value (default: 1.0)
-
-- CO2_REG_ADDR: Start address for CO2 (Required)
-- CO2_REG_COUNT: Number of registers (1 or 2, default: 1)
-- CO2_TYPE: Data type (uint16, int16, uint32, int32, float32; default: uint16)
-- CO2_ENDIAN: Word order for 32-bit types be/le (default: be)
-- CO2_SCALE: Multiplier applied to parsed value (default: 1.0)
-
-HTTP API
-- POST /connect
-  Open the serial port and set Modbus RTU parameters using environment variables. Does not start polling.
-  Example: curl -X POST http://localhost:8080/connect
-
-- POST /poll/start
-  Begin continuous polling of the configured registers via Modbus function 0x03.
-  Example: curl -X POST http://localhost:8080/poll/start
-
-- POST /poll/stop
-  Halt polling loop (keeps serial link open).
-  Example: curl -X POST http://localhost:8080/poll/stop
-
-- POST /disconnect
-  Stop polling and close the serial port.
-  Example: curl -X POST http://localhost:8080/disconnect
-
-- PUT /config/polling
-  Update the poll interval for subsequent cycles. Body: {"interval_ms": 1000}
-  Example: curl -X PUT http://localhost:8080/config/polling -H 'Content-Type: application/json' -d '{"interval_ms":1500}'
-
-- GET /readings
-  Return the latest parsed readings and timestamp.
-  Example: curl http://localhost:8080/readings
-
-- GET /status
-  Driver and link status, last poll timestamp, last error, and current poll interval.
-  Example: curl http://localhost:8080/status
+Environment Variables (required)
+- HTTP_HOST: Host/IP for HTTP server (e.g., 0.0.0.0)
+- HTTP_PORT: Port for HTTP server (e.g., 8080)
+- MODBUS_HOST: Sensor IP (e.g., 192.168.1.50)
+- MODBUS_PORT: Sensor Modbus TCP port (typically 502)
+- MODBUS_UNIT_ID: Modbus unit/slave ID (e.g., 1)
+- SAMPLING_INTERVAL_SECONDS: Poll interval seconds (set to 5 for requirement)
+- RETRY_COUNT: Number of retry attempts per poll cycle (e.g., 3)
+- TIMEOUT_MS: Socket timeout in milliseconds for Modbus operations (e.g., 1000)
+- BACKOFF_INITIAL_SECONDS: Initial backoff seconds on failure (e.g., 1)
+- BACKOFF_MAX_SECONDS: Maximum backoff seconds (e.g., 30)
+- REG_TEMP_ADDR: Holding register address for temperature (e.g., 100)
+- REG_HUM_ADDR: Holding register address for humidity (e.g., 101)
+- REG_STATUS_ADDR: Holding register address for device status (e.g., 102)
+- ALARM_TEMP_LOW: Low temperature alarm threshold (°C)
+- ALARM_TEMP_HIGH: High temperature alarm threshold (°C)
+- ALARM_HUM_LOW: Low humidity alarm threshold (% RH)
+- ALARM_HUM_HIGH: High humidity alarm threshold (% RH)
+- LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 
 Notes
-- The driver implements Modbus RTU CRC16, function code 0x03, and per-request timeouts.
-- On polling errors, it retries with exponential backoff up to BACKOFF_MAX_MS.
-- Latest readings are kept in-memory for quick GET /readings responses.
-- All configuration is provided via environment variables; API allows runtime poll interval adjustments only (non-persistent).
+- Temperature is interpreted as signed 16-bit integer from a single holding register. Humidity is interpreted as an unsigned 16-bit integer. If your sensor uses scaling (e.g., value*100), convert via register configuration or adapt upstream.
+- The driver reads one register each for temperature, humidity, and device status. Provide correct addresses via environment variables.
+
+Run
+1) Set environment variables, for example:
+   export HTTP_HOST=0.0.0.0
+   export HTTP_PORT=8080
+   export MODBUS_HOST=192.168.1.50
+   export MODBUS_PORT=502
+   export MODBUS_UNIT_ID=1
+   export SAMPLING_INTERVAL_SECONDS=5
+   export RETRY_COUNT=3
+   export TIMEOUT_MS=1000
+   export BACKOFF_INITIAL_SECONDS=1
+   export BACKOFF_MAX_SECONDS=30
+   export REG_TEMP_ADDR=100
+   export REG_HUM_ADDR=101
+   export REG_STATUS_ADDR=102
+   export ALARM_TEMP_LOW=-10
+   export ALARM_TEMP_HIGH=60
+   export ALARM_HUM_LOW=20
+   export ALARM_HUM_HIGH=80
+   export LOG_LEVEL=INFO
+
+2) Start the driver:
+   python3 driver.py
+
+HTTP API
+- GET /readings
+  Returns latest temperature (°C), humidity (% RH), and timestamp from last successful poll.
+  curl -s http://localhost:8080/readings
+
+- GET /config
+  Returns current runtime driver configuration: sampling interval, alarm thresholds, and communication settings.
+  curl -s http://localhost:8080/config
+
+- GET /status
+  Returns driver and connection status, including connected flag, last poll time, retry count, timeout, and recent error summary.
+  curl -s http://localhost:8080/status
 
 Generated by [IoT Driver Copilot](https://copilot.test.shifu.dev/)
