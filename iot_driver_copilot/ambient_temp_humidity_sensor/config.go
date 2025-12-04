@@ -1,4 +1,4 @@
-package main
+package ambient_temp_humidity_sensor
 
 import (
 	"log"
@@ -15,19 +15,19 @@ type Config struct {
 	HTTPPort int
 
 	// Serial / Modbus RTU
-	SerialPort       string
-	SerialBaud       int
-	SerialDataBits   int
-	SerialParity     string // N/E/O
-	SerialStopBits   int    // 1/2
-	SerialReadChunkMs int   // internal chunk timeout for serial reads
+	SerialPort        string
+	SerialBaud        int
+	SerialDataBits    int
+	SerialParity      string // N/E/O
+	SerialStopBits    int    // 1/2
+	SerialReadChunkMs int    // internal chunk timeout for serial reads
 
-	ModbusSlaveID    int
+	ModbusSlaveID int
 
 	// Registers
-	RegTemperature      int
-	RegHumidity         int
-	RegSampleInterval   int
+	RegTemperature    int
+	RegHumidity       int
+	RegSampleInterval int
 
 	// Scaling factors
 	ScaleTemperature float64
@@ -38,10 +38,10 @@ type Config struct {
 	PollIntervalSec       int
 
 	// Retry/backoff
-	RetryMax       int
-	BackoffBaseMs  int
-	BackoffMaxMs   int
-	ReadTimeoutMs  int // overall transaction timeout per Modbus request
+	RetryMax      int
+	BackoffBaseMs int
+	BackoffMaxMs  int
+	ReadTimeoutMs int // overall transaction timeout per Modbus request
 
 	// Logging
 	LogLevel string
@@ -101,11 +101,11 @@ func LoadConfig() Config {
 		HTTPHost: getenv("HTTP_HOST", "0.0.0.0"),
 		HTTPPort: getenvInt("HTTP_PORT", 8080),
 
-		SerialPort:       getenv("SERIAL_PORT", "/dev/ttyUSB0"),
-		SerialBaud:       getenvInt("SERIAL_BAUD", 9600),
-		SerialDataBits:   getenvInt("SERIAL_DATA_BITS", 8),
-		SerialParity:     strings.ToUpper(getenv("SERIAL_PARITY", "N")),
-		SerialStopBits:   getenvInt("SERIAL_STOP_BITS", 1),
+		SerialPort:        getenv("SERIAL_PORT", "/dev/ttyUSB0"),
+		SerialBaud:        getenvInt("SERIAL_BAUD", 9600),
+		SerialDataBits:    getenvInt("SERIAL_DATA_BITS", 8),
+		SerialParity:      strings.ToUpper(getenv("SERIAL_PARITY", "N")),
+		SerialStopBits:    getenvInt("SERIAL_STOP_BITS", 1),
 		SerialReadChunkMs: getenvInt("SERIAL_READ_CHUNK_MS", 50),
 
 		ModbusSlaveID: getenvInt("MODBUS_SLAVE_ID", 1),

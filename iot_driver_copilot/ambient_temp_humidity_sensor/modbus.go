@@ -1,4 +1,4 @@
-package main
+package ambient_temp_humidity_sensor
 
 import (
 	"encoding/binary"
